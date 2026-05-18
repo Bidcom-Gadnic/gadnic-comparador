@@ -851,6 +851,17 @@ const APP = {
         </div>
 
         <button class="btn-primary" onclick="APP.saveConfig()">Guardar configuración</button>
+
+        <div style="margin-top:24px;padding-top:24px;border-top:1px solid var(--border)">
+          <h3 style="margin-bottom:8px">📥 Importar catálogo desde JSON</h3>
+          <p class="config-hint" style="margin-bottom:12px">Cargá un archivo JSON de catálogo para importar productos en masa. Los productos con el mismo SKU se actualizan.</p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="file" id="json-import-file" accept=".json" style="display:none" onchange="APP.importJSON(this)">
+            <button class="btn-ghost" onclick="document.getElementById(\'json-import-file\').click()">📂 Seleccionar archivo JSON</button>
+          </div>
+          <div id="import-status" style="display:none;margin-top:10px;font-size:12px;padding:10px 14px;border-radius:6px"></div>
+        </div>
+
         <div style="margin-top:24px;padding-top:24px;border-top:1px solid var(--border)">
           <h3 style="margin-bottom:12px">⚠ Zona de riesgo</h3>
           <button class="btn-danger" onclick="APP.clearAllData()">Borrar todos los datos locales</button>
@@ -868,6 +879,48 @@ const APP = {
     DB.saveSettings(settings);
     if (settings.geminiKey) document.getElementById('setup-banner').style.display = 'none';
     this.showToast('Configuración guardada.', 'success');
+  },
+
+  importJSON(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const status = document.getElementById('import-status');
+      status.style.display = 'block';
+      try {
+        const data = JSON.parse(e.target.result);
+        if (!data.categoria || !data.productos) throw new Error('Formato inválido. El JSON debe tener "categoria" y "productos".');
+        const catId = data.categoria;
+        if (!CONFIG.categorias[catId]) throw new Error(`Categoría "${catId}" no reconocida.`);
+
+        let added = 0, updated = 0;
+        const existing = DB.getCatalog(catId);
+
+        for (const prod of data.productos) {
+          prod.fecha = new Date().toISOString();
+          const ex = existing.find(p => p.sku === prod.sku);
+          if (ex) {
+            DB.updateProduct(catId, ex.id, prod);
+            updated++;
+          } else {
+            DB.addProduct(catId, prod);
+            added++;
+          }
+        }
+
+        status.style.background = '#0f2d1a';
+        status.style.color = '#6ee7b7';
+        status.textContent = `✅ Importado en "${CONFIG.categorias[catId].nombre}": ${added} nuevos, ${updated} actualizados.`;
+        input.value = '';
+        this.showToast(`${added + updated} productos importados.`, 'success');
+      } catch(err) {
+        status.style.background = '#2d0f0f';
+        status.style.color = '#fca5a5';
+        status.textContent = '⚠ Error: ' + err.message;
+      }
+    };
+    reader.readAsText(file);
   },
 
   clearAllData() {
