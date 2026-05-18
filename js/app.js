@@ -1006,34 +1006,90 @@ const APP = {
         const uriAnnots = annotations
           .filter(a => a.subtype === 'Link' && a.url)
           .sort((a, b) => {
-            // Sort by Y first (row), then X (column)
             const ay = Math.round(a.rect[1]);
             const by = Math.round(b.rect[1]);
-            if (ay !== by) return by - ay; // PDF coords: Y increases downward inversely
+            if (ay !== by) return by - ay;
             return a.rect[0] - b.rect[0];
           });
 
         // Group by Y row
         const rowMap = {};
         for (const a of uriAnnots) {
-          const y = Math.round(a.rect[1] / 5) * 5; // bucket by 5pt
+          const y = Math.round(a.rect[1] / 5) * 5;
           rowMap[y] = rowMap[y] || [];
-          rowMap[y].push(a.url);
+          rowMap[y].push({ url: a.url, x: a.rect[0] });
         }
 
-        const rows = Object.values(rowMap);
-        // Heuristic: rows ordered by position
-        // Row with bidcom.com.ar URLs = publicacion
-        // Row with google sheets/drive = qc
-        // Row with drive/folders = artworks
-        for (const row of rows) {
-          if (row.some(u => u.includes('bidcom.com.ar'))) {
-            linksByRow.publicacion.push(...row);
-          } else if (row.some(u => u.includes('spreadsheets') || (u.includes('drive.google') && u.includes('file')))) {
-            linksByRow.qc.push(...row);
-          } else if (row.some(u => u.includes('drive.google'))) {
-            linksByRow.artworks.push(...row);
+        for (const row of Object.values(rowMap)) {
+          const urls = row.sort((a,b) => a.x - b.x).map(r => r.url);
+          if (urls.some(u => u.includes('bidcom.com.ar'))) {
+            linksByRow.publicacion.push(...row.sort((a,b) => a.x - b.x).map(r => ({ url: r.url, x: r.x })));
+          } else if (urls.some(u => u.includes('spreadsheets') || (u.includes('drive.google') && u.includes('file')))) {
+            linksByRow.qc.push(...urls);
+          } else if (urls.some(u => u.includes('drive.google'))) {
+            linksByRow.artworks.push(...urls);
           }
+        }
+
+        // ── Extract images with X position for column matching ────────────
+        const ops = await page.getOperatorList();
+        const imgPositions = [];
+
+        // Use page object map to get image positions via transform
+        const viewport = page.getViewport({ scale: 1 });
+        for (const annot of await page.getAnnotations()) { void annot; } // warmup
+
+        // Get image blocks via text content dict — images appear as type==1 blocks
+        // We use a canvas approach: render page and clip each image bbox
+        const canvas = document.createElement('canvas');
+        const scale  = 1.5;
+        const vp     = page.getViewport({ scale });
+        canvas.width  = vp.width;
+        canvas.height = vp.height;
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+        // Now extract image bboxes from operator list
+        // PDF.js exposes image xobjects; we find their positions via the OPS
+        const fnArray  = ops.fnArray;
+        const argsArray = ops.argsArray;
+        const OPS = window.pdfjsLib.OPS;
+        let currentTransform = [1,0,0,1,0,0];
+        const imgBboxes = [];
+
+        for (let k = 0; k < fnArray.length; k++) {
+          if (fnArray[k] === OPS.transform) {
+            currentTransform = argsArray[k];
+          }
+          if (fnArray[k] === OPS.paintImageXObject || fnArray[k] === OPS.paintJpegXObject) {
+            // currentTransform = [a,b,c,d,e,f]
+            // e=x, f=y (bottom-left in PDF coords), a=width, d=height
+            const [a,,, d, e, f] = currentTransform;
+            // Convert PDF coords to viewport coords
+            const x0 = e * scale;
+            const y0 = (viewport.height - f - Math.abs(d)) * scale;
+            const w  = Math.abs(a) * scale;
+            const h  = Math.abs(d) * scale;
+            const xCenter = e + Math.abs(a) / 2; // in PDF units for matching
+            imgBboxes.push({ x0, y0, w, h, xCenter });
+          }
+        }
+
+        // Extract each image as data URL by clipping the canvas
+        for (const bbox of imgBboxes) {
+          const imgCanvas = document.createElement('canvas');
+          imgCanvas.width  = Math.round(bbox.w);
+          imgCanvas.height = Math.round(bbox.h);
+          const imgCtx = imgCanvas.getContext('2d');
+          imgCtx.drawImage(canvas, bbox.x0, bbox.y0, bbox.w, bbox.h, 0, 0, bbox.w, bbox.h);
+          const dataUrl = imgCanvas.toDataURL('image/jpeg', 0.85);
+          linksByRow.images = linksByRow.images || [];
+          linksByRow.images.push({ dataUrl, xCenter: bbox.xCenter });
+        }
+
+        // Sort images by X
+        if (linksByRow.images) {
+          linksByRow.images.sort((a,b) => a.xCenter - b.xCenter);
         }
       }
 
@@ -1068,16 +1124,29 @@ const APP = {
     const body = document.getElementById('pdf-import-body');
     if (!body) return;
 
+    // Assign images to products by column index (same X ordering)
+    const images = linksByRow.images || [];
+    if (images.length === products.length) {
+      products.forEach((p, i) => {
+        if (!p.imagen_url && images[i]) p.imagen_url = images[i].dataUrl;
+      });
+    }
+
     const rows = products.map((p, i) => `
       <tr>
         <td><input type="checkbox" class="pdf-check" data-i="${i}" checked></td>
+        <td style="text-align:center">
+          ${p.imagen_url
+            ? `<img src="${p.imagen_url}" style="width:40px;height:40px;object-fit:contain;border-radius:4px;border:1px solid var(--border)">`
+            : '<span style="font-size:20px">📷</span>'}
+        </td>
         <td><span class="sku-text">${p.sku || '–'}</span></td>
-        <td style="max-width:200px"><strong>${p.nombre || '–'}</strong></td>
+        <td style="max-width:180px"><strong>${p.nombre || '–'}</strong></td>
         <td><span class="nivel-pill">${p.nivel || '–'}</span></td>
         <td>${p.pvp_ars ? '$' + Number(p.pvp_ars).toLocaleString('es-AR') : '–'}</td>
         <td>${p.fob_usd ? 'USD ' + p.fob_usd : '–'}</td>
         <td>${p.rentabilidad ? p.rentabilidad + '%' : '–'}</td>
-        <td style="max-width:160px;font-size:11px">
+        <td style="max-width:140px;font-size:11px">
           ${p.fuente
             ? `<a href="${p.fuente}" target="_blank" style="color:var(--accent);word-break:break-all">${p.fuente.replace('https://www.bidcom.com.ar','bidcom.com.ar')}</a>`
             : '<span class="nd">–</span>'}
@@ -1086,14 +1155,14 @@ const APP = {
 
     body.innerHTML = `
       <div class="gen-status success" style="margin-bottom:16px">
-        ✅ Se detectaron <strong>${products.length} productos</strong>. Revisá y seleccioná los que querés importar.
+        ✅ Se detectaron <strong>${products.length} productos</strong>${images.length === products.length ? ` con <strong>${images.length} imágenes</strong>` : ''}. Revisá y seleccioná los que querés importar.
       </div>
       <div class="table-scroll" style="max-height:340px;overflow-y:auto">
         <table class="data-table" style="font-size:12px">
           <thead>
             <tr>
               <th><input type="checkbox" id="pdf-check-all" checked onchange="document.querySelectorAll('.pdf-check').forEach(c=>c.checked=this.checked)"></th>
-              <th>SKU</th><th>Nombre</th><th>Nivel</th>
+              <th>Img</th><th>SKU</th><th>Nombre</th><th>Nivel</th>
               <th>PVP ARS</th><th>FOB USD</th><th>Rent.</th><th>Link</th>
             </tr>
           </thead>
@@ -1117,6 +1186,13 @@ const APP = {
     if (!selected.length) {
       this.showToast('Seleccioná al menos un producto.', 'warn');
       return;
+    }
+
+    // Auto-build imagen_url from SKU for Bidcom products that don't have one
+    for (const prod of selected) {
+      if (!prod.imagen_url && prod.sku) {
+        prod.imagen_url = `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${prod.sku}/1000x1000-${prod.sku}-B.jpg&w=400&q=100`;
+      }
     }
 
     let added = 0, updated = 0;
