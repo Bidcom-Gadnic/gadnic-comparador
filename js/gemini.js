@@ -117,16 +117,19 @@ Respondé SOLO con JSON válido, sin texto adicional ni backticks:
 
   // ── Resolve imagen_url: template first, og:image fallback ─────────────────
   async resolveImageUrl(sku, fuenteUrl) {
-    const templateUrl = `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${sku}/1000x1000-${sku}-B.jpg&w=400&q=100`;
+    const variants = ['A', 'B', 'C'];
 
-    // Step 1: check if template URL exists
-    try {
-      const res = await fetch(templateUrl, { method: 'HEAD' });
-      if (res.ok) return templateUrl;
-    } catch { /* fall through */ }
+    // Step 1: try each variant (A, B, C) with HEAD request
+    for (const v of variants) {
+      const url = `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${sku}/1000x1000-${sku}-${v}.jpg&w=400&q=100`;
+      try {
+        const res = await fetch(url, { method: 'HEAD' });
+        if (res.ok) return url;
+      } catch { /* try next */ }
+    }
 
-    // Step 2: fetch og:image from publication URL via Jina
-    if (!fuenteUrl) return templateUrl;
+    // Step 2: fallback to og:image from publication URL via Jina
+    if (!fuenteUrl) return `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${sku}/1000x1000-${sku}-A.jpg&w=400&q=100`;
     try {
       const jinaUrl = `https://r.jina.ai/${fuenteUrl}`;
       const res = await fetch(jinaUrl, {
@@ -135,13 +138,10 @@ Respondé SOLO con JSON válido, sin texto adicional ni backticks:
       const text = await res.text();
       const match = text.match(/og:image['":\s]+([^\s'"]+bidcom[^\s'"]+\.(jpg|jpeg|png|webp))/i)
                  || text.match(/https?:\/\/[^\s'"]+bidcom[^\s'"]+\.(jpg|jpeg|png|webp)/i);
-      if (match) {
-        const url = match[1] || match[0];
-        return url.trim();
-      }
+      if (match) return (match[1] || match[0]).trim();
     } catch { /* fall through */ }
 
-    return templateUrl;
+    return `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${sku}/1000x1000-${sku}-A.jpg&w=400&q=100`;
   },
 
   // ── Extract multiple products from PDF text + annotations ─────────────────

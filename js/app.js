@@ -1061,7 +1061,7 @@ const APP = {
     // Build imagen_url from SKU template for all products that don't have one
     products.forEach(p => {
       if (!p.imagen_url && p.sku) {
-        p.imagen_url = `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${p.sku}/1000x1000-${p.sku}-B.jpg&w=400&q=100`;
+        p.imagen_url = `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${p.sku}/1000x1000-${p.sku}-A.jpg&w=400&q=100`;
       }
     });
 
