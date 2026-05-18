@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gadnic · Comparador de Productos</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ── Sidebar nav ─────────────────────────────────────────────────────────── -->
+<nav class="sidebar">
+  <div class="sidebar-logo">
+    <div class="brand">GADNIC</div>
+    <div class="brand-sub">Comparador v1.0</div>
+  </div>
+  <div class="nav-items">
+    <div class="nav-item active" data-nav="catalogo">
+      <span class="nav-icon">📦</span> Catálogo
+    </div>
+    <div class="nav-item" data-nav="nueva">
+      <span class="nav-icon">➕</span> Nueva comparativa
+    </div>
+    <div class="nav-item" data-nav="indice">
+      <span class="nav-icon">📋</span> Índice
+    </div>
+    <div class="nav-item" data-nav="config">
+      <span class="nav-icon">⚙️</span> Configuración
+    </div>
+  </div>
+  <div class="sidebar-foot">
+    Gadnic · Mayo 2026
+  </div>
+</nav>
+
+<!-- ── Main area ───────────────────────────────────────────────────────────── -->
+<main class="main-area">
+
+  <!-- Setup banner (shown when no API key) -->
+  <div class="setup-banner" id="setup-banner">
+    <span class="sb-icon">⚡</span>
+    <div>
+      <strong>Configurá tu Gemini API Key</strong> para habilitar la extracción automática con IA.
+    </div>
+    <button class="btn-ghost" onclick="APP.go('config')">Ir a Config →</button>
+  </div>
+
+  <!-- Sección: Catálogo -->
+  <div id="sec-catalogo">
+    <div class="sec-head">
+      <h2>Catálogo de Productos</h2>
+    </div>
+    <div id="cat-tabs"></div>
+    <div id="cat-content"></div>
+  </div>
+
+  <!-- Sección: Nueva comparativa (wizard) -->
+  <div id="sec-nueva" style="display:none"></div>
+
+  <!-- Sección: Índice -->
+  <div id="sec-indice" style="display:none"></div>
+
+  <!-- Sección: Config -->
+  <div id="sec-config" style="display:none"></div>
+
+</main>
+
+<!-- Toast area -->
+<div id="toast-area"></div>
+
+<!-- Scripts -->
+<script src="js/config.js"></script>
+<script src="js/db.js"></script>
+<script src="js/gemini.js"></script>
+<script src="js/export.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
