@@ -334,6 +334,8 @@ body {
 .pci-info strong { display: block; font-size: 13px; margin-bottom: 3px; }
 .pci-info span { font-size: 11px; color: var(--text-muted); }
 .pci-img { width: 48px; height: 48px; object-fit: contain; border-radius: 6px; }
+.pci-check { font-size: 20px; color: var(--accent); min-width: 24px; }
+.prod-check-item { cursor: pointer; }
 
 /* External products */
 .ext-card {
