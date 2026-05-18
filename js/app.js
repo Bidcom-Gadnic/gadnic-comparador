@@ -94,6 +94,8 @@ const APP = {
       <div class="cat-toolbar">
         <button class="btn-primary" onclick="APP.openProductModal('${catId}')">+ Agregar producto</button>
         <button class="btn-ghost" onclick="APP.syncFromSheets('${catId}')">↓ Sincronizar desde Sheets</button>
+        <button class="btn-ai" onclick="APP.openPDFImport('${catId}')">📄 Importar desde PDF</button>
+        <input type="file" id="pdf-import-input" accept=".pdf" style="display:none" onchange="APP.handlePDFImport(this,'${catId}')">
         <span class="count-label">${prods.length} productos en catálogo</span>
       </div>
       <div class="table-scroll">
@@ -861,12 +863,11 @@ const APP = {
         <button class="btn-primary" onclick="APP.saveConfig()">Guardar configuración</button>
 
         <div style="margin-top:24px;padding-top:24px;border-top:1px solid var(--border)">
-          <h3 style="margin-bottom:8px">💾 Backup completo</h3>
-          <p class="config-hint" style="margin-bottom:12px">Exportá todo el catálogo, comparativas y configuración a un archivo JSON. Guardalo como respaldo — podés reimportarlo en cualquier momento o en otro navegador.</p>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <button class="btn-primary" onclick="APP.exportAllJSON()">⬇ Exportar todo (JSON)</button>
-            <button class="btn-ghost" onclick="document.getElementById('json-import-file').click()">📂 Importar backup</button>
-            <input type="file" id="json-import-file" accept=".json" style="display:none" onchange="APP.importAllJSON(this)">
+          <h3 style="margin-bottom:8px">📥 Importar catálogo desde JSON</h3>
+          <p class="config-hint" style="margin-bottom:12px">Cargá un archivo JSON de catálogo para importar productos en masa. Los productos con el mismo SKU se actualizan.</p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="file" id="json-import-file" accept=".json" style="display:none" onchange="APP.importJSON(this)">
+            <button class="btn-ghost" onclick="document.getElementById(\'json-import-file\').click()">📂 Seleccionar archivo JSON</button>
           </div>
           <div id="import-status" style="display:none;margin-top:10px;font-size:12px;padding:10px 14px;border-radius:6px"></div>
         </div>
@@ -890,20 +891,7 @@ const APP = {
     this.showToast('Configuración guardada.', 'success');
   },
 
-  exportAllJSON() {
-    const data = DB.exportAll();
-    const json = JSON.stringify(data, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const a    = document.createElement('a');
-    const fecha = new Date().toLocaleDateString('es-AR').replace(/\//g,'-');
-    a.href     = URL.createObjectURL(blob);
-    a.download = `gadnic-comparador-backup-${fecha}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    this.showToast('Backup exportado.', 'success');
-  },
-
-  importAllJSON(input) {
+  importJSON(input) {
     const file = input.files[0];
     if (!file) return;
     const reader = new FileReader();
@@ -912,15 +900,33 @@ const APP = {
       status.style.display = 'block';
       try {
         const data = JSON.parse(e.target.result);
-        DB.importAll(data);
-        status.style.background = '#f0fdf4';
-        status.style.color = '#166534';
-        status.textContent = '✅ Backup importado correctamente. Recargando…';
+        if (!data.categoria || !data.productos) throw new Error('Formato inválido. El JSON debe tener "categoria" y "productos".');
+        const catId = data.categoria;
+        if (!CONFIG.categorias[catId]) throw new Error(`Categoría "${catId}" no reconocida.`);
+
+        let added = 0, updated = 0;
+        const existing = DB.getCatalog(catId);
+
+        for (const prod of data.productos) {
+          prod.fecha = new Date().toISOString();
+          const ex = existing.find(p => p.sku === prod.sku);
+          if (ex) {
+            DB.updateProduct(catId, ex.id, prod);
+            updated++;
+          } else {
+            DB.addProduct(catId, prod);
+            added++;
+          }
+        }
+
+        status.style.background = '#0f2d1a';
+        status.style.color = '#6ee7b7';
+        status.textContent = `✅ Importado en "${CONFIG.categorias[catId].nombre}": ${added} nuevos, ${updated} actualizados.`;
         input.value = '';
-        setTimeout(() => location.reload(), 1200);
+        this.showToast(`${added + updated} productos importados.`, 'success');
       } catch(err) {
-        status.style.background = '#fef2f2';
-        status.style.color = '#991b1b';
+        status.style.background = '#2d0f0f';
+        status.style.color = '#fca5a5';
         status.textContent = '⚠ Error: ' + err.message;
       }
     };
@@ -931,6 +937,205 @@ const APP = {
     if (!confirm('¿Borrar TODO? Catálogo, comparativas y configuración. Esto no se puede deshacer.')) return;
     localStorage.clear();
     location.reload();
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PDF IMPORT
+  // ═══════════════════════════════════════════════════════════════════════════
+  openPDFImport(catId) {
+    const input = document.getElementById('pdf-import-input');
+    // Re-create input to allow same file re-selection
+    input.value = '';
+    input.setAttribute('onchange', `APP.handlePDFImport(this,'${catId}')`);
+    input.click();
+  },
+
+  async handlePDFImport(input, catId) {
+    const file = input.files[0];
+    if (!file) return;
+
+    const cat = CONFIG.categorias[catId];
+
+    // Show progress modal
+    document.body.insertAdjacentHTML('beforeend', `
+      <div class="modal-overlay" id="pdf-import-modal">
+        <div class="modal-box" style="max-width:560px">
+          <div class="modal-head">
+            <h2>📄 Importar desde PDF — ${cat.nombre}</h2>
+          </div>
+          <div class="modal-body" id="pdf-import-body">
+            <div class="pdf-step" id="pdf-step-reading">
+              <div class="pdf-spinner">⏳</div>
+              <p>Leyendo PDF y extrayendo links…</p>
+            </div>
+          </div>
+        </div>
+      </div>`);
+
+    try {
+      // ── Step 1: Load PDF.js from CDN ──────────────────────────────────────
+      if (!window.pdfjsLib) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+
+      // ── Step 2: Read file as ArrayBuffer ──────────────────────────────────
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+      // ── Step 3: Extract text + annotations from all pages ─────────────────
+      let fullText = '';
+      const linksByRow = { publicacion: [], qc: [], artworks: [] };
+
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+
+        // Text
+        const tc = await page.getTextContent();
+        fullText += tc.items.map(i => i.str).join(' ') + '\n';
+
+        // Annotations (links)
+        const annotations = await page.getAnnotations();
+        const uriAnnots = annotations
+          .filter(a => a.subtype === 'Link' && a.url)
+          .sort((a, b) => {
+            // Sort by Y first (row), then X (column)
+            const ay = Math.round(a.rect[1]);
+            const by = Math.round(b.rect[1]);
+            if (ay !== by) return by - ay; // PDF coords: Y increases downward inversely
+            return a.rect[0] - b.rect[0];
+          });
+
+        // Group by Y row
+        const rowMap = {};
+        for (const a of uriAnnots) {
+          const y = Math.round(a.rect[1] / 5) * 5; // bucket by 5pt
+          rowMap[y] = rowMap[y] || [];
+          rowMap[y].push(a.url);
+        }
+
+        const rows = Object.values(rowMap);
+        // Heuristic: rows ordered by position
+        // Row with bidcom.com.ar URLs = publicacion
+        // Row with google sheets/drive = qc
+        // Row with drive/folders = artworks
+        for (const row of rows) {
+          if (row.some(u => u.includes('bidcom.com.ar'))) {
+            linksByRow.publicacion.push(...row);
+          } else if (row.some(u => u.includes('spreadsheets') || (u.includes('drive.google') && u.includes('file')))) {
+            linksByRow.qc.push(...row);
+          } else if (row.some(u => u.includes('drive.google'))) {
+            linksByRow.artworks.push(...row);
+          }
+        }
+      }
+
+      // ── Step 4: Call AI ───────────────────────────────────────────────────
+      this._pdfUpdateStatus('🤖 Enviando a IA para interpretar los productos…');
+
+      const products = await GEMINI.extractFromPDF(fullText, linksByRow, catId);
+
+      // ── Step 5: Show preview ──────────────────────────────────────────────
+      this._pdfShowPreview(products, catId, linksByRow);
+
+    } catch(e) {
+      document.getElementById('pdf-import-body').innerHTML = `
+        <div class="gen-status error" style="margin:0">⚠ ${e.message}</div>
+        <div class="modal-foot" style="padding:16px 0 0;border:none">
+          <button class="btn-ghost" onclick="APP.closeModal('pdf-import-modal')">Cerrar</button>
+        </div>`;
+    }
+  },
+
+  _pdfUpdateStatus(msg) {
+    const body = document.getElementById('pdf-import-body');
+    if (body) body.innerHTML = `
+      <div style="text-align:center;padding:32px 0">
+        <div style="font-size:32px;margin-bottom:16px">🤖</div>
+        <p style="color:var(--text-muted);font-size:13px">${msg}</p>
+      </div>`;
+  },
+
+  _pdfShowPreview(products, catId, linksByRow) {
+    const cat = CONFIG.categorias[catId];
+    const body = document.getElementById('pdf-import-body');
+    if (!body) return;
+
+    const rows = products.map((p, i) => `
+      <tr>
+        <td><input type="checkbox" class="pdf-check" data-i="${i}" checked></td>
+        <td><span class="sku-text">${p.sku || '–'}</span></td>
+        <td style="max-width:200px"><strong>${p.nombre || '–'}</strong></td>
+        <td><span class="nivel-pill">${p.nivel || '–'}</span></td>
+        <td>${p.pvp_ars ? '$' + Number(p.pvp_ars).toLocaleString('es-AR') : '–'}</td>
+        <td>${p.fob_usd ? 'USD ' + p.fob_usd : '–'}</td>
+        <td>${p.rentabilidad ? p.rentabilidad + '%' : '–'}</td>
+        <td style="max-width:160px;font-size:11px">
+          ${p.fuente
+            ? `<a href="${p.fuente}" target="_blank" style="color:var(--accent);word-break:break-all">${p.fuente.replace('https://www.bidcom.com.ar','bidcom.com.ar')}</a>`
+            : '<span class="nd">–</span>'}
+        </td>
+      </tr>`).join('');
+
+    body.innerHTML = `
+      <div class="gen-status success" style="margin-bottom:16px">
+        ✅ Se detectaron <strong>${products.length} productos</strong>. Revisá y seleccioná los que querés importar.
+      </div>
+      <div class="table-scroll" style="max-height:340px;overflow-y:auto">
+        <table class="data-table" style="font-size:12px">
+          <thead>
+            <tr>
+              <th><input type="checkbox" id="pdf-check-all" checked onchange="document.querySelectorAll('.pdf-check').forEach(c=>c.checked=this.checked)"></th>
+              <th>SKU</th><th>Nombre</th><th>Nivel</th>
+              <th>PVP ARS</th><th>FOB USD</th><th>Rent.</th><th>Link</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="modal-foot" style="padding:16px 0 0;border:none;justify-content:flex-end;display:flex;gap:10px">
+        <button class="btn-ghost" onclick="APP.closeModal('pdf-import-modal')">Cancelar</button>
+        <button class="btn-primary" onclick="APP.confirmPDFImport(${JSON.stringify(products).replace(/"/g,'&quot;')},'${catId}')">
+          ✅ Importar seleccionados
+        </button>
+      </div>`;
+  },
+
+  confirmPDFImport(products, catId) {
+    const checks = document.querySelectorAll('.pdf-check');
+    const selected = products.filter((_, i) =>
+      checks[i] && checks[i].checked
+    );
+
+    if (!selected.length) {
+      this.showToast('Seleccioná al menos un producto.', 'warn');
+      return;
+    }
+
+    let added = 0, updated = 0;
+    const existing = DB.getCatalog(catId);
+
+    for (const prod of selected) {
+      const ex = existing.find(p => p.sku && p.sku === prod.sku);
+      if (ex) {
+        DB.updateProduct(catId, ex.id, prod);
+        updated++;
+      } else {
+        DB.addProduct(catId, prod);
+        added++;
+      }
+    }
+
+    this.closeModal('pdf-import-modal');
+    this.showToast(`PDF importado: ${added} nuevos, ${updated} actualizados.`, 'success');
+    this.renderCatalog();
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

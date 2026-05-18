@@ -115,6 +115,65 @@ Respondé SOLO con JSON válido, sin texto adicional ni backticks:
     return this._parseJSON(text);
   },
 
+  // ── Extract multiple products from PDF text + annotations ─────────────────
+  async extractFromPDF(pdfText, linksByRow, catId) {
+    const cat    = CONFIG.categorias[catId];
+    const campos = cat.campos.map(c =>
+      `"${c.id}": null  // ${c.label}${c.unidad ? ' en ' + c.unidad : ''} (tipo: ${c.tipo})`
+    ).join('\n      ');
+
+    // Build link context string for the prompt
+    const linkContext = linksByRow.publicacion?.length
+      ? `\nLos links de publicación en orden de columna son:\n${linksByRow.publicacion.map((u,i) => `  Producto ${i+1}: ${u}`).join('\n')}`
+      : '';
+
+    const prompt = `Sos un analista de productos para Argentina.
+El siguiente texto fue extraído de un PDF de roadmap/catálogo de productos Gadnic/Bidcom.
+Categoría: ${cat.nombre}
+
+TEXTO DEL PDF:
+${pdfText.substring(0, 12000)}
+${linkContext}
+
+Extraé TODOS los productos que encuentres en este documento.
+Para cada producto completá los campos según el schema de la categoría.
+Asigná el link de publicación al campo "fuente" según el orden de columnas.
+
+Respondé SOLO con JSON válido, sin texto adicional ni backticks:
+[
+  {
+    "sku": "",
+    "nombre": "",
+    "nivel": "",
+    "fuente": "",
+    "fob_usd": null,
+    "pvp_ars": null,
+    "rentabilidad": null,
+    "imagen_url": null,
+    ${campos},
+    "diferenciadores": ""
+  }
+]
+
+Notas:
+- Para booleanos usá true o false, nunca strings.
+- Para números eliminá símbolos ($, %, USD) y convertí a número.
+- Para "nivel" estimá: Entry / Mid / Mid-High / High / Premium según precio y specs.
+- Si un campo no aplica usá null.
+- El campo "fuente" debe ser el link de publicación de Bidcom si está disponible.`;
+
+    const text = await this._call(prompt);
+
+    // Parse — may return array directly or wrapped
+    const clean = text.replace(/```json\n?|\n?```|```/g, '').trim();
+    try {
+      const parsed = JSON.parse(clean);
+      return Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      throw new Error('No se pudo parsear la respuesta de IA. Intentá de nuevo.');
+    }
+  },
+
   // ── Fill missing specs using AI ────────────────────────────────────────────
   async fillMissingSpecs(product, catId) {
     const cat     = CONFIG.categorias[catId];
