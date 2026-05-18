@@ -3,6 +3,22 @@ const GEMINI = {
   MODEL: 'llama-3.3-70b-versatile',
   ENDPOINT: 'https://api.groq.com/openai/v1/chat/completions',
 
+  async _fetchURL(url) {
+    // Jina AI Reader — convierte cualquier URL en texto + imágenes, gratis
+    const jinaUrl = `https://r.jina.ai/${url}`;
+    try {
+      const res = await fetch(jinaUrl, {
+        headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
+      });
+      if (!res.ok) throw new Error(`Jina error ${res.status}`);
+      const text = await res.text();
+      return text.substring(0, 8000); // limit context
+    } catch(e) {
+      console.warn('Jina fetch failed, using URL only:', e.message);
+      return null;
+    }
+  },
+
   async _call(prompt) {
     const { geminiKey } = DB.getSettings();
     if (!geminiKey) throw new Error('API key no configurada. Ir a ⚙️ Config.');
