@@ -115,6 +115,35 @@ Respondé SOLO con JSON válido, sin texto adicional ni backticks:
     return this._parseJSON(text);
   },
 
+  // ── Resolve imagen_url: template first, og:image fallback ─────────────────
+  async resolveImageUrl(sku, fuenteUrl) {
+    const templateUrl = `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${sku}/1000x1000-${sku}-B.jpg&w=400&q=100`;
+
+    // Step 1: check if template URL exists
+    try {
+      const res = await fetch(templateUrl, { method: 'HEAD' });
+      if (res.ok) return templateUrl;
+    } catch { /* fall through */ }
+
+    // Step 2: fetch og:image from publication URL via Jina
+    if (!fuenteUrl) return templateUrl;
+    try {
+      const jinaUrl = `https://r.jina.ai/${fuenteUrl}`;
+      const res = await fetch(jinaUrl, {
+        headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
+      });
+      const text = await res.text();
+      const match = text.match(/og:image['":\s]+([^\s'"]+bidcom[^\s'"]+\.(jpg|jpeg|png|webp))/i)
+                 || text.match(/https?:\/\/[^\s'"]+bidcom[^\s'"]+\.(jpg|jpeg|png|webp)/i);
+      if (match) {
+        const url = match[1] || match[0];
+        return url.trim();
+      }
+    } catch { /* fall through */ }
+
+    return templateUrl;
+  },
+
   // ── Extract multiple products from PDF text + annotations ─────────────────
   async extractFromPDF(pdfText, linksByRow, catId) {
     const cat    = CONFIG.categorias[catId];

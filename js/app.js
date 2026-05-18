@@ -1058,19 +1058,36 @@ const APP = {
     const body = document.getElementById('pdf-import-body');
     if (!body) return;
 
-    // Build imagen_url from SKU for all products that don't have one
+    // Build imagen_url from SKU template for all products that don't have one
     products.forEach(p => {
       if (!p.imagen_url && p.sku) {
         p.imagen_url = `https://images.bidcom.com.ar/resize?src=https://static.bidcom.com.ar/publicacionesML/productos/${p.sku}/1000x1000-${p.sku}-B.jpg&w=400&q=100`;
       }
     });
 
+    // onerror handler: if template URL fails, fetch og:image from publication URL
+    const onImgError = async (img, sku, fuenteUrl, idx) => {
+      img.style.display = 'none';
+      if (!fuenteUrl) return;
+      try {
+        const resolved = await GEMINI.resolveImageUrl(sku, fuenteUrl);
+        if (resolved !== img.src) {
+          img.src = resolved;
+          img.style.display = '';
+          // Update the product so it gets saved with the correct URL
+          products[idx].imagen_url = resolved;
+        }
+      } catch { /* leave hidden */ }
+    };
+    // Expose globally for inline onerror
+    window._pdfImgError = onImgError;
+
     const rows = products.map((p, i) => `
       <tr>
         <td><input type="checkbox" class="pdf-check" data-i="${i}" checked></td>
         <td style="text-align:center">
           ${p.imagen_url
-            ? `<img src="${p.imagen_url}" style="width:40px;height:40px;object-fit:contain;border-radius:4px;border:1px solid var(--border)" onerror="this.style.display='none'">`
+            ? `<img src="${p.imagen_url}" data-i="${i}" data-sku="${p.sku||''}" data-fuente="${p.fuente||''}" style="width:40px;height:40px;object-fit:contain;border-radius:4px;border:1px solid var(--border)" onerror="window._pdfImgError(this,'${p.sku||''}','${p.fuente||''}',${i})">`
             : '<span style="font-size:20px">📷</span>'}
         </td>
         <td><span class="sku-text">${p.sku || '–'}</span></td>
