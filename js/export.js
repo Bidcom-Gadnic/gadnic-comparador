@@ -188,11 +188,18 @@ const EXPORT = {
 
     const colHeaders = todos.map((p, i) => {
       const isPropio = i < propios.length;
+      const precio   = p.pvp_ars
+        ? '$' + Number(p.pvp_ars).toLocaleString('es-AR')
+        : p.precio_ars ? '$' + Number(p.precio_ars).toLocaleString('es-AR') : '–';
+      const imgEl = p.imagen_url
+        ? `<div class="col-img-wrap"><img src="${p.imagen_url}" class="col-img" onerror="this.style.display='none'"></div>`
+        : '<div class="col-img-wrap col-img-empty">📷</div>';
       return `<th class="${isPropio ? 'col-propio' : 'col-externo'}">
         <div class="col-type">${isPropio ? '▲ PROPIO' : '📦 EXTERNO'}</div>
+        ${imgEl}
         <div class="col-sku">${p.sku || '–'}</div>
         <div class="col-nombre">${p.nombre || '–'}</div>
-        <div class="col-precio">${p.pvp_ars ? '$' + Number(p.pvp_ars).toLocaleString('es-AR') : p.precio_ars ? '$' + Number(p.precio_ars).toLocaleString('es-AR') : '–'}</div>
+        <div class="col-precio">${precio}</div>
         ${p.fob_usd ? `<div class="col-fob">FOB USD ${p.fob_usd}</div>` : ''}
         ${this._rentabilidad(p)}
       </th>`;
@@ -351,6 +358,9 @@ const EXPORT = {
   .col-propio { background: rgba(99,102,241,.06); }
   .col-externo { background: rgba(245,158,11,.06); }
   .col-type { font-size: 9px; font-weight: 700; letter-spacing: .08em; opacity: .7; }
+  .col-img-wrap { width: 70px; height: 70px; margin: 8px auto 6px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 6px; border: 1px solid #e2e8f0; overflow: hidden; }
+  .col-img { width: 100%; height: 100%; object-fit: contain; padding: 4px; }
+  .col-img-empty { font-size: 24px; color: #cbd5e1; }
   .col-sku { font-size: 9px; opacity: .6; margin: 2px 0; }
   .col-nombre { font-size: 11px; font-weight: 700; line-height: 1.3; }
   .col-precio { font-size: 13px; font-weight: 800; color: #0284c7; margin-top: 4px; }
