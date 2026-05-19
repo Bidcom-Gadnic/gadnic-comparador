@@ -517,11 +517,14 @@ const APP = {
           </div>
           <div class="form-row-2">
             <div class="form-group">
-              <label>Imagen URL</label>
+              <label>Imagen</label>
               <div class="img-url-row">
-                <input type="text" value="${p.imagen_url||''}" onchange="APP.updateExterno(${i},'imagen_url',this.value)" placeholder="https://...jpg">
-                ${p.imagen_url ? `<img src="${p.imagen_url}" class="img-preview">` : ''}
+                <input type="text" id="img-url-${i}" value="${p.imagen_url||''}" onchange="APP.updateExterno(${i},'imagen_url',this.value)" placeholder="https://...jpg" style="flex:1">
+                <button class="btn-paste-img" title="Pegar imagen del portapapeles" onclick="APP.pasteImage(${i})">📋</button>
+                <input type="file" id="img-file-${i}" accept="image/*" style="display:none" onchange="APP.fileToImage(${i},this)">
+                <button class="btn-paste-img" title="Subir imagen" onclick="document.getElementById('img-file-${i}').click()">🖼</button>
               </div>
+              ${p.imagen_url ? `<img src="${p.imagen_url}" class="img-preview" style="margin-top:6px;width:60px;height:60px;object-fit:contain;border-radius:6px;border:1px solid var(--border)">` : ''}
             </div>
             <div class="form-group">
               <label>Fuente / URL</label>
@@ -565,26 +568,11 @@ const APP = {
           <h2>Productos externos</h2>
           <div class="wizard-steps">${this._stepsDots(4)}</div>
         </div>
-
-        <div class="file-import-box">
-          <div class="fib-icon">📎</div>
-          <div class="fib-text">
-            <strong>Cargar desde archivo</strong>
-            <span>Excel de cotización o PDF de roadmap — la IA detecta todos los productos automáticamente</span>
-          </div>
-          <input type="file" id="ext-file-input" accept=".xlsx,.xls,.pdf" style="display:none"
-            onchange="APP.loadExternosFromFile(this)">
-          <button class="btn-primary" onclick="document.getElementById('ext-file-input').click()">
-            Seleccionar archivo
-          </button>
-        </div>
-
-        <div class="ext-separator"><span>o cargá productos uno a uno</span></div>
-
+        <p class="wizard-hint">Cargá los productos con los que querés comparar. Pegá la URL y usá ✨ IA para extraer las specs automáticamente, o completá a mano.</p>
         <div id="externos-list">
-          ${externos.length ? externos.map((p,i) => renderExtCard(p,i)).join('') : ''}
+          ${externos.length ? externos.map((p,i) => renderExtCard(p,i)).join('') : `<div class="empty-wizard">Agregá al menos un producto externo.</div>`}
         </div>
-        <button class="btn-ghost btn-add-ext" onclick="APP.addExterno()">+ Agregar producto externo manualmente</button>
+        <button class="btn-ghost btn-add-ext" onclick="APP.addExterno()">+ Agregar producto externo</button>
         <div class="wizard-foot">
           <button class="btn-ghost" onclick="APP.wizardBack()">← Atrás</button>
           <button class="btn-primary" onclick="APP.wizardNext()" ${externos.length===0?'disabled':''}>Siguiente →</button>
@@ -592,146 +580,64 @@ const APP = {
       </div>`;
   },
 
-  // ── Load externos from Excel or PDF file ─────────────────────────────────
-  async loadExternosFromFile(input) {
+  // ── Paste image from clipboard ────────────────────────────────────────────
+  async pasteImage(i) {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imgType = item.types.find(t => t.startsWith('image/'));
+        if (imgType) {
+          const blob   = await item.getType(imgType);
+          const b64    = await this._blobToBase64(blob);
+          this.state.wizard.externos[i].imagen_url = b64;
+          // Update preview without full re-render
+          const input = document.getElementById('img-url-' + i);
+          if (input) input.value = '(imagen pegada)';
+          const preview = input?.closest('.form-group')?.querySelector('.img-preview');
+          if (preview) { preview.src = b64; }
+          else {
+            const div = document.createElement('img');
+            div.src = b64; div.className = 'img-preview';
+            div.style.cssText = 'margin-top:6px;width:60px;height:60px;object-fit:contain;border-radius:6px;border:1px solid var(--border)';
+            input?.closest('.form-group')?.appendChild(div);
+          }
+          this.showToast('Imagen pegada.', 'success');
+          return;
+        }
+      }
+      this.showToast('No hay imagen en el portapapeles. Copiá la imagen primero (clic derecho → Copiar imagen).', 'warn');
+    } catch(e) {
+      // Fallback: ask user to use file upload
+      this.showToast('No se pudo acceder al portapapeles. Usá el botón 🖼 para subir el archivo.', 'warn');
+    }
+  },
+
+  async fileToImage(i, input) {
     const file = input.files[0];
     if (!file) return;
-    const { catId } = this.state.wizard;
-    const ext = file.name.split('.').pop().toLowerCase();
-
-    // Show loading modal
-    document.body.insertAdjacentHTML('beforeend', `
-      <div class="modal-overlay" id="ext-file-modal">
-        <div class="modal-box" style="max-width:500px">
-          <div class="modal-head">
-            <h2>📎 Importando archivo</h2>
-          </div>
-          <div class="modal-body" id="ext-file-body">
-            <div style="text-align:center;padding:30px">
-              <div style="font-size:32px;margin-bottom:12px">⏳</div>
-              <p id="ext-file-status">Leyendo archivo…</p>
-            </div>
-          </div>
-        </div>
-      </div>`);
-
-    const setStatus = (msg) => {
-      const el = document.getElementById('ext-file-status');
-      if (el) el.textContent = msg;
-    };
-
-    try {
-      let textContent = '';
-      let linksByRow  = {};
-
-      if (ext === 'pdf') {
-        // ── PDF via pdf.js ────────────────────────────────────────────────
-        setStatus('Cargando lector de PDF…');
-        if (!window.pdfjsLib) {
-          await new Promise((res, rej) => {
-            const s = document.createElement('script');
-            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-            s.onload = res; s.onerror = rej;
-            document.head.appendChild(s);
-          });
-          window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-            'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        }
-        setStatus('Extrayendo texto del PDF…');
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        for (let p = 1; p <= pdf.numPages; p++) {
-          const page  = await pdf.getPage(p);
-          const items = (await page.getTextContent()).items;
-          textContent += items.map(i => i.str).join(' ') + '\n';
-        }
-
-      } else if (ext === 'xlsx' || ext === 'xls') {
-        // ── Excel via SheetJS ─────────────────────────────────────────────
-        setStatus('Cargando lector de Excel…');
-        if (!window.XLSX) {
-          await new Promise((res, rej) => {
-            const s = document.createElement('script');
-            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-            s.onload = res; s.onerror = rej;
-            document.head.appendChild(s);
-          });
-        }
-        setStatus('Leyendo hojas de cálculo…');
-        const arrayBuffer = await file.arrayBuffer();
-        const wb = window.XLSX.read(arrayBuffer, { type: 'array' });
-        // Convert all sheets to CSV text
-        for (const sheetName of wb.SheetNames) {
-          const ws  = wb.Sheets[sheetName];
-          const csv = window.XLSX.utils.sheet_to_csv(ws, { blankrows: false });
-          textContent += `
-=== Hoja: ${sheetName} ===
-${csv}
-`;
-        }
-      } else {
-        throw new Error('Formato no soportado. Usá Excel (.xlsx) o PDF.');
-      }
-
-      setStatus('🤖 Enviando a IA para interpretar los productos…');
-      const products = await GEMINI.extractFromPDF(textContent, linksByRow, catId);
-
-      if (!products || !products.length) throw new Error('No se encontraron productos en el archivo.');
-
-      // Show preview to confirm
-      this._showExternosPreview(products, catId);
-
-    } catch(e) {
-      document.getElementById('ext-file-body').innerHTML = `
-        <div style="padding:20px;text-align:center">
-          <p style="color:var(--danger);margin-bottom:16px">⚠ ${e.message}</p>
-          <button class="btn-ghost" onclick="APP.closeModal('ext-file-modal')">Cerrar</button>
-        </div>`;
+    const b64 = await this._blobToBase64(file);
+    this.state.wizard.externos[i].imagen_url = b64;
+    const urlInput = document.getElementById('img-url-' + i);
+    if (urlInput) urlInput.value = '(imagen cargada)';
+    const existing = urlInput?.closest('.form-group')?.querySelector('.img-preview');
+    if (existing) { existing.src = b64; }
+    else {
+      const img = document.createElement('img');
+      img.src = b64; img.className = 'img-preview';
+      img.style.cssText = 'margin-top:6px;width:60px;height:60px;object-fit:contain;border-radius:6px;border:1px solid var(--border)';
+      urlInput?.closest('.form-group')?.appendChild(img);
     }
+    this.showToast('Imagen cargada.', 'success');
     input.value = '';
   },
 
-  _showExternosPreview(products, catId) {
-    // Store in state to avoid passing large JSON through onclick
-    this.state._pendingExternos = products;
-    const rows = products.map((p, i) => {
-      const precio = p.precio_ars
-        ? '$' + Number(p.precio_ars).toLocaleString('es-AR')
-        : p.pvp_ars ? '$' + Number(p.pvp_ars).toLocaleString('es-AR') : '–';
-      const fob = p.fob_usd ? 'USD ' + p.fob_usd : '–';
-      const sku = (p.sku || '–').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      const nom = (p.nombre || '–').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      return `<tr>
-        <td><input type="checkbox" class="ext-check" data-i="${i}" checked></td>
-        <td><span class="sku-text">${sku}</span></td>
-        <td>${nom}</td>
-        <td>${precio}</td>
-        <td>${fob}</td>
-      </tr>`;
-    }).join('');
-
-    const bodyParts = [];
-    bodyParts.push('<p style="margin-bottom:14px;font-size:13px;color:var(--text-muted)">Se encontraron <strong>' + products.length + ' productos</strong>. Seleccioná cuáles agregar.</p>');
-    bodyParts.push('<div style="overflow-x:auto;max-height:380px;overflow-y:auto"><table class="data-table">');
-    bodyParts.push('<thead><tr><th><input type="checkbox" id="ext-check-all" checked onclick="document.querySelectorAll(\'.ext-check\').forEach(c=>c.checked=this.checked)"></th>');
-    bodyParts.push('<th>SKU</th><th>Nombre</th><th>Precio</th><th>FOB</th></tr></thead>');
-    bodyParts.push('<tbody>' + rows + '</tbody></table></div>');
-    bodyParts.push('<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">');
-    bodyParts.push('<button class="btn-ghost" onclick="APP.closeModal(\'ext-file-modal\')">Cancelar</button>');
-    bodyParts.push('<button class="btn-primary" onclick="APP.confirmExternosFromFile()">Agregar seleccionados</button>');
-    bodyParts.push('</div>');
-    document.getElementById('ext-file-body').innerHTML = bodyParts.join('');
-  },
-
-  confirmExternosFromFile() {
-    const products = this.state._pendingExternos || [];
-    const checks   = document.querySelectorAll('.ext-check');
-    const selected = products.filter((_, i) => checks[i]?.checked);
-    this.state.wizard.externos.push(...selected);
-    this.state._pendingExternos = null;
-    this.closeModal('ext-file-modal');
-    this.renderWizardStep4();
-    this.showToast(selected.length + ' productos agregados desde el archivo.', 'success');
+  _blobToBase64(blob) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload  = () => res(r.result);
+      r.onerror = rej;
+      r.readAsDataURL(blob);
+    });
   },
 
   addExterno() {
