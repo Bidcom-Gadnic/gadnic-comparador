@@ -407,3 +407,42 @@ body {
   display: flex; align-items: center; justify-content: center;
 }
 .btn-paste-img:hover { background: var(--accent-lt); border-color: var(--accent); }
+
+/* ── Category manager ────────────────────────────────────────────────────── */
+.cat-list-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+.cat-list-info { display: flex; align-items: center; gap: 12px; }
+.cat-list-emoji { font-size: 24px; }
+.cat-list-info strong { display: block; font-size: 13px; font-weight: 600; }
+.cat-list-meta { font-size: 11px; color: var(--text-muted); }
+.cat-list-actions { display: flex; gap: 6px; }
+
+/* Campo rows in category modal */
+.campos-header {
+  display: grid; grid-template-columns: 1fr .6fr .7fr .4fr;
+  gap: 8px; padding: 4px 8px;
+  font-size: 11px; font-weight: 700; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: .04em;
+  margin-bottom: 6px;
+}
+.campo-row {
+  display: grid; grid-template-columns: 1fr .6fr .7fr .4fr auto;
+  gap: 8px; align-items: center; margin-bottom: 8px;
+}
+.campo-row input, .campo-row select {
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--radius-sm);
+  padding: 6px 8px; font-family: inherit; font-size: 12px; width: 100%;
+}
+.campo-row input:focus, .campo-row select:focus {
+  outline: none; border-color: var(--accent);
+}
+.campo-req-wrap {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--text-muted); white-space: nowrap;
+  cursor: pointer;
+}
