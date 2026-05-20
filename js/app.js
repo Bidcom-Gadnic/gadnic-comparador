@@ -14,18 +14,21 @@ const APP = {
     this.checkSetup();
     this.bindNav();
     this.render();
-    // Auto-sync catalogs from Sheets on load
-    this._autoSync();
+    // Auto-sync in background after app loads — never blocks UI
+    setTimeout(() => this._autoSync(), 1500);
   },
 
   async _autoSync() {
     try {
+      const ok = await DB.pingScript();
+      if (!ok) return;
       for (const catId of Object.keys(CONFIG.categorias)) {
         await DB.pullCatalog(catId);
       }
       await DB.pullComparativas();
       this.render();
-    } catch { /* silent fail */ }
+      this.showToast('Catálogo sincronizado con Sheets.', 'success');
+    } catch { /* silent fail — never blocks app */ }
   },
 
   checkSetup() {
