@@ -22,7 +22,7 @@ const APP = {
     try {
       const ok = await DB.pingScript();
       if (!ok) return;
-      for (const catId of Object.keys(CONFIG.categorias)) {
+      for (const catId of Object.keys(CONFIG.getAllCats())) {
         await DB.pullCatalog(catId);
       }
       await DB.pullComparativas();
@@ -76,11 +76,11 @@ const APP = {
   // ═══════════════════════════════════════════════════════════════════════════
   renderCatalog() {
     const catId = this.state.catTab;
-    const cat   = CONFIG.categorias[catId];
+    const cat   = CONFIG.getAllCats()[catId];
     const prods = DB.getCatalog(catId);
 
     // Tabs
-    document.getElementById('cat-tabs').innerHTML = Object.values(CONFIG.categorias).map(c => `
+    document.getElementById('cat-tabs').innerHTML = Object.values(CONFIG.getAllCats()).map(c => `
       <button class="tab-btn ${c.id === catId ? 'active' : ''}" onclick="APP.setCatTab('${c.id}')">
         ${c.emoji} ${c.nombre}
         <span class="tab-count">${DB.getCatalog(c.id).length}</span>
@@ -170,7 +170,7 @@ const APP = {
   // PRODUCT MODAL (Add / Edit)
   // ═══════════════════════════════════════════════════════════════════════════
   openProductModal(catId, product = null) {
-    const cat    = CONFIG.categorias[catId];
+    const cat    = CONFIG.getAllCats()[catId];
     const isEdit = !!product;
     const p      = product || {};
 
@@ -333,7 +333,7 @@ const APP = {
       this.showToast('SKU o Nombre son obligatorios.', 'error'); return;
     }
     // Convert booleans and numbers
-    const cat = CONFIG.categorias[catId];
+    const cat = CONFIG.getAllCats()[catId];
     for (const f of cat.campos) {
       if (f.tipo === 'booleano' && data[f.id] !== '') data[f.id] = data[f.id] === 'true';
       if (f.tipo === 'numero'  && data[f.id] !== '') data[f.id] = parseFloat(data[f.id]) || data[f.id];
@@ -381,7 +381,7 @@ const APP = {
         </div>
         <h3 class="wizard-q">¿Qué categoría querés comparar?</h3>
         <div class="choice-grid">
-          ${Object.values(CONFIG.categorias).map(c => `
+          ${Object.values(CONFIG.getAllCats()).map(c => `
             <div class="choice-card ${this.state.wizard.catId===c.id?'selected':''}" onclick="APP.selectCat('${c.id}')">
               <div class="choice-emoji">${c.emoji}</div>
               <div class="choice-label">${c.nombre}</div>
@@ -434,7 +434,7 @@ const APP = {
     const { catId, tipo } = this.state.wizard;
     if (tipo === 'mixto') { this.wizardNext(); return; }
 
-    const cat   = CONFIG.categorias[catId];
+    const cat   = CONFIG.getAllCats()[catId];
     const prods = DB.getCatalog(catId);
 
     document.getElementById('sec-nueva').innerHTML = `
@@ -489,7 +489,7 @@ const APP = {
   // Step 4: Add external products
   renderWizardStep4() {
     const { catId, tipo } = this.state.wizard;
-    const cat   = CONFIG.categorias[catId];
+    const cat   = CONFIG.getAllCats()[catId];
     const externos = this.state.wizard.externos;
 
     const renderExtCard = (p, i) => `
@@ -811,7 +811,7 @@ const APP = {
   // Step 5: Generate comparison
   async renderWizardStep5() {
     const { catId, tipo, propios, externos, nombre } = this.state.wizard;
-    const cat = CONFIG.categorias[catId];
+    const cat = CONFIG.getAllCats()[catId];
 
     document.getElementById('sec-nueva').innerHTML = `
       <div class="wizard-wrap">
@@ -874,7 +874,7 @@ const APP = {
   // Step 6: Preview & Export
   renderWizardStep6() {
     const w   = this.state.wizard;
-    const cat = CONFIG.categorias[w.catId];
+    const cat = CONFIG.getAllCats()[w.catId];
 
     document.getElementById('sec-nueva').innerHTML = `
       <div class="wizard-wrap wizard-wide">
@@ -923,7 +923,7 @@ const APP = {
     const w    = this.state.wizard;
     const comp = { ...w, fecha: new Date().toISOString() };
     const html = EXPORT.generate(comp, w.formato);
-    const cat  = CONFIG.categorias[w.catId];
+    const cat  = CONFIG.getAllCats()[w.catId];
     const name = (w.nombre || `comparativa_${cat.id}`).replace(/\s+/g,'_').toLowerCase();
     EXPORT.downloadHTML(html, `${name}_${w.formato}.html`);
     this.showToast('HTML descargado.', 'success');
@@ -934,7 +934,7 @@ const APP = {
     const comp = {
       catId:    w.catId,
       tipo:     w.tipo,
-      nombre:   w.nombre || `Comparativa ${CONFIG.categorias[w.catId].nombre}`,
+      nombre:   w.nombre || `Comparativa ${CONFIG.getAllCats()[w.catId].nombre}`,
       propios:  w.propios,
       externos: w.externos,
       analisis: w.analisis,
@@ -963,7 +963,7 @@ const APP = {
     const list = DB.getComparativas();
     const rows = list.length
       ? list.map(c => {
-          const cat  = CONFIG.categorias[c.catId] || {};
+          const cat  = CONFIG.getAllCats()[c.catId] || {};
           const tipo = CONFIG.tipos.find(t => t.id === c.tipo) || {};
           return `
             <tr>
@@ -1038,6 +1038,126 @@ const APP = {
   // ═══════════════════════════════════════════════════════════════════════════
   // CONFIG
   // ═══════════════════════════════════════════════════════════════════════════
+  _renderCatsList() {
+    const allCats = CONFIG.getAllCats();
+    return Object.values(allCats).map(cat => {
+      const isBase = CONFIG.isBaseCat(cat.id);
+      return '<div class="cat-list-item">' +
+        '<div class="cat-list-info">' +
+        '<span class="cat-list-emoji">' + cat.emoji + '</span>' +
+        '<div>' +
+        '<strong>' + cat.nombre + '</strong>' +
+        '<span class="cat-list-meta">' + cat.campos.length + ' specs · ' + (isBase ? 'Base' : 'Personalizada') + '</span>' +
+        '</div></div>' +
+        '<div class="cat-list-actions">' +
+        '<button class="btn-icon" onclick="APP.openCatModal(\'' + cat.id + '\')" title="Editar">✏️</button>' +
+        (!isBase ? '<button class="btn-icon btn-del" onclick="APP.deleteCat(\'' + cat.id + '\')" title="Eliminar">🗑</button>' : '') +
+        '</div></div>';
+    }).join('');
+  },
+
+  openCatModal(catId = null) {
+    const allCats = CONFIG.getAllCats();
+    const cat     = catId ? allCats[catId] : null;
+    const isBase  = catId ? CONFIG.isBaseCat(catId) : false;
+    const campos  = cat ? cat.campos : [];
+
+    const camposHTML = campos.map((f, i) =>
+      '<div class="campo-row" data-i="' + i + '">' +
+      '<input type="text" class="campo-label" value="' + (f.label||'') + '" placeholder="Nombre del campo">' +
+      '<input type="text" class="campo-unidad" value="' + (f.unidad||'') + '" placeholder="Unidad (Pa, W...)">' +
+      '<select class="campo-tipo">' +
+      '<option value="texto"' + (f.tipo==='texto'?' selected':'') + '>Texto</option>' +
+      '<option value="numero"' + (f.tipo==='numero'?' selected':'') + '>Número</option>' +
+      '<option value="booleano"' + (f.tipo==='booleano'?' selected':'') + '>Sí/No</option>' +
+      '</select>' +
+      '<label class="campo-req-wrap"><input type="checkbox" class="campo-req"' + (f.req?' checked':'') + '> Req</label>' +
+      (!isBase ? '<button class="btn-icon btn-del" onclick="this.closest(\'.campo-row\').remove()">✕</button>' : '') +
+      '</div>'
+    ).join('');
+
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="modal-overlay" id="cat-modal">' +
+      '<div class="modal-box modal-lg">' +
+      '<div class="modal-head">' +
+      '<h2>' + (cat ? 'Editar categoría' : 'Nueva categoría') + '</h2>' +
+      '<button class="modal-close" onclick="APP.closeModal(\'cat-modal\')">✕</button>' +
+      '</div>' +
+      '<div class="modal-body">' +
+      '<div class="form-grid-2" style="margin-bottom:20px">' +
+      '<div class="form-group"><label>Nombre de la categoría *</label>' +
+      '<input type="text" id="cat-nombre" value="' + (cat?.nombre||'') + '" placeholder="ej. Lavarropas" ' + (isBase?'disabled':'') + '></div>' +
+      '<div class="form-group"><label>Emoji</label>' +
+      '<input type="text" id="cat-emoji" value="' + (cat?.emoji||'') + '" placeholder="🏠" maxlength="2" ' + (isBase?'disabled':'') + '></div>' +
+      '</div>' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
+      '<h3 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">Specs técnicas</h3>' +
+      (!isBase ? '<button class="btn-ghost" onclick="APP._addCampoRow()" style="font-size:12px">+ Agregar spec</button>' : '') +
+      '</div>' +
+      '<div class="campos-header"><span>Campo</span><span>Unidad</span><span>Tipo</span><span>Req</span></div>' +
+      '<div id="campos-list">' + camposHTML + '</div>' +
+      '</div>' +
+      '<div class="modal-foot">' +
+      '<button class="btn-ghost" onclick="APP.closeModal(\'cat-modal\')">Cancelar</button>' +
+      (!isBase ? '<button class="btn-primary" onclick="APP.saveCat(\'' + (catId||'') + '\')">' + 'Guardar categoría</button>' : '<span style="font-size:12px;color:var(--text-muted)">Las categorías base se editan en config.js</span>') +
+      '</div></div></div>');
+  },
+
+  _addCampoRow() {
+    const row = document.createElement('div');
+    row.className = 'campo-row';
+    row.innerHTML =
+      '<input type="text" class="campo-label" placeholder="Nombre del campo">' +
+      '<input type="text" class="campo-unidad" placeholder="Unidad (Pa, W...)">' +
+      '<select class="campo-tipo">' +
+      '<option value="texto">Texto</option>' +
+      '<option value="numero">Número</option>' +
+      '<option value="booleano">Sí/No</option>' +
+      '</select>' +
+      '<label class="campo-req-wrap"><input type="checkbox" class="campo-req"> Req</label>' +
+      '<button class="btn-icon btn-del" onclick="this.closest(\'.campo-row\').remove()">✕</button>';
+    document.getElementById('campos-list').appendChild(row);
+  },
+
+  saveCat(existingId) {
+    const nombre = document.getElementById('cat-nombre').value.trim();
+    const emoji  = document.getElementById('cat-emoji').value.trim() || '📦';
+    if (!nombre) { this.showToast('El nombre es obligatorio.', 'error'); return; }
+
+    const campos = [];
+    document.querySelectorAll('.campo-row').forEach(row => {
+      const label = row.querySelector('.campo-label').value.trim();
+      if (!label) return;
+      const unidad = row.querySelector('.campo-unidad').value.trim();
+      const tipo   = row.querySelector('.campo-tipo').value;
+      const req    = row.querySelector('.campo-req').checked;
+      const id     = label.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/__+/g, '_');
+      campos.push({ id, label, unidad: unidad || undefined, tipo, req });
+    });
+
+    if (!campos.length) { this.showToast('Agregá al menos una spec.', 'error'); return; }
+
+    const id = existingId || nombre.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/__+/g, '_');
+    const sheetName = 'Catalogo_' + nombre.replace(/\s+/g, '');
+
+    CONFIG.addCustomCat({ id, nombre, emoji, sheetName, niveles: ['Entry','Mid','High','Premium'], campos });
+    this.closeModal('cat-modal');
+    this.showToast('Categoría guardada.', 'success');
+    this.renderConfig();
+    // Re-render catalog tabs
+    if (this.state.section === 'catalogo') this.renderCatalog();
+  },
+
+  deleteCat(catId) {
+    if (!confirm('¿Eliminar esta categoría? Se borrarán también los productos del catálogo local.')) return;
+    CONFIG.deleteCustomCat(catId);
+    DB.saveCatalog(catId, []);
+    if (this.state.catTab === catId) this.state.catTab = 'robot';
+    this.showToast('Categoría eliminada.', 'success');
+    this.renderConfig();
+    this.renderCatalog();
+  },
+
   renderConfig() {
     const s = DB.getSettings();
     document.getElementById('sec-config').innerHTML = `
@@ -1078,6 +1198,14 @@ const APP = {
         </div>
 
         <button class="btn-primary" onclick="APP.saveConfig()">Guardar configuración</button>
+
+        <div style="margin-top:28px;padding-top:24px;border-top:1px solid var(--border)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+            <h3 style="margin:0">📂 Categorías de producto</h3>
+            <button class="btn-primary" onclick="APP.openCatModal()">+ Nueva categoría</button>
+          </div>
+          <div id="cats-list">${this._renderCatsList()}</div>
+        </div>
 
         <div style="margin-top:24px;padding-top:24px;border-top:1px solid var(--border)">
           <h3 style="margin-bottom:8px">💾 Backup completo</h3>
@@ -1167,7 +1295,7 @@ const APP = {
     const file = input.files[0];
     if (!file) return;
 
-    const cat = CONFIG.categorias[catId];
+    const cat = CONFIG.getAllCats()[catId];
 
     // Show progress modal
     document.body.insertAdjacentHTML('beforeend', `
@@ -1267,7 +1395,7 @@ const APP = {
   },
 
   _pdfShowPreview(products, catId, linksByRow) {
-    const cat = CONFIG.categorias[catId];
+    const cat = CONFIG.getAllCats()[catId];
     const body = document.getElementById('pdf-import-body');
     if (!body) return;
 

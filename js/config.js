@@ -88,3 +88,39 @@ const CONFIG = {
     competencia: { label: 'Competencia',           color: '#ef4444' },
   }
 };
+
+// ── Dynamic category management ───────────────────────────────────────────────
+// Merges base categories (config.js) with custom categories (localStorage)
+CONFIG.getAllCats = function() {
+  const custom = JSON.parse(localStorage.getItem('gadnic_custom_cats') || '[]');
+  const merged = { ...CONFIG.categorias };
+  for (const cat of custom) {
+    merged[cat.id] = cat;
+  }
+  return merged;
+};
+
+CONFIG.getCustomCats = function() {
+  return JSON.parse(localStorage.getItem('gadnic_custom_cats') || '[]');
+};
+
+CONFIG.saveCustomCats = function(cats) {
+  localStorage.setItem('gadnic_custom_cats', JSON.stringify(cats));
+};
+
+CONFIG.addCustomCat = function(cat) {
+  const cats = CONFIG.getCustomCats();
+  const existing = cats.findIndex(c => c.id === cat.id);
+  if (existing >= 0) cats[existing] = cat;
+  else cats.push(cat);
+  CONFIG.saveCustomCats(cats);
+};
+
+CONFIG.deleteCustomCat = function(catId) {
+  const cats = CONFIG.getCustomCats().filter(c => c.id !== catId);
+  CONFIG.saveCustomCats(cats);
+};
+
+CONFIG.isBaseCat = function(catId) {
+  return !!CONFIG.categorias[catId];
+};
