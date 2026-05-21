@@ -120,23 +120,17 @@ const DB = {
   // ── Apps Script API ───────────────────────────────────────────────────────
 
   async _get(params) {
-    // GET requests work fine with CORS on Apps Script
     const url = this.APPS_SCRIPT_URL + '?' + new URLSearchParams(params);
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`Error ${res.status}`);
     return res.json();
   },
 
   async _post(body) {
-    // POST to Apps Script requires no-cors (preflight blocked)
-    // Write still happens — we just don't get a confirmation response
-    await fetch(this.APPS_SCRIPT_URL, {
+    const res = await fetch(this.APPS_SCRIPT_URL, {
       method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(body)
     });
-    return { ok: true };
+    return res.json();
   },
 
   async pingScript() {
@@ -233,5 +227,76 @@ const DB = {
 
   _parseJSON(str) {
     try { return JSON.parse(str || '[]'); } catch { return []; }
+  },
+
+  // ── Load categories from Sheet ─────────────────────────────────────────────
+  async loadCategoriesFromSheet() {
+    try {
+      const data = await this._get({ action: 'read', sheet: 'Categorias' });
+      if (!data.rows || !data.rows.length) return false;
+
+      const custom = [];
+      for (const row of data.rows) {
+        const id        = String(row['ID'] || '').trim();
+        const nombre    = String(row['Nombre'] || '').trim();
+        const sheetName = String(row['SheetName'] || '').trim();
+        if (!id || !nombre || !sheetName) continue;
+        if (CONFIG.isBaseCat(id)) continue; // skip base cats
+
+        // Load fields from that catalog sheet's columns
+        const campos = await this._loadFieldsFromSheet(sheetName);
+        custom.push({
+          id,
+          nombre,
+          emoji:     String(row['Emoji'] || '📦').trim(),
+          sheetName,
+          niveles:   ['Entry','Mid','High','Premium'],
+          campos
+        });
+      }
+
+      CONFIG.saveCustomCats(custom);
+      return true;
+    } catch(e) {
+      console.warn('loadCategoriesFromSheet:', e);
+      return false;
+    }
+  },
+
+  // ── Load field definitions from catalog sheet column headers ───────────────
+  async _loadFieldsFromSheet(sheetName) {
+    try {
+      const data = await this._get({ action: 'readHeaders', sheet: sheetName });
+      if (!data.headers) return [];
+      return data.headers
+        .map(h => CONFIG.parseFieldFromColumn(h))
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  },
+
+  // ── Push all categories to Categorias sheet ────────────────────────────────
+  async pushCategories() {
+    const allCats = CONFIG.getAllCats();
+    const rows    = Object.values(allCats).map(cat => ({
+      ID:        cat.id,
+      Nombre:    cat.nombre,
+      Emoji:     cat.emoji || '📦',
+      SheetName: cat.sheetName
+    }));
+    return this._post({ action: 'upsertCats', rows });
+  },
+
+  // ── Create new category in Sheet (just the tab + header row) ──────────────
+  async createCategorySheet(cat) {
+    const fixedCols = ['SKU','Nombre','Nivel','PVP_ARS','FOB_USD','Rentabilidad','Fuente'];
+    const dynCols   = cat.campos.map(f => {
+      if (f.tipo === 'booleano') return f.label.replace(/\s+/g,'_') + '_SN';
+      if (f.tipo === 'numero' && f.unidad) return f.label.replace(/\s+/g,'_') + '_' + f.unidad;
+      return f.label.replace(/\s+/g,'_');
+    });
+    const headers = [...fixedCols, ...dynCols];
+    return this._post({ action: 'createSheet', sheetName: cat.sheetName, headers });
   },
 };

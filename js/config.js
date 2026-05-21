@@ -89,15 +89,49 @@ const CONFIG = {
   }
 };
 
-// ── Dynamic category management ───────────────────────────────────────────────
-// Merges base categories (config.js) with custom categories (localStorage)
-CONFIG.getAllCats = function() {
-  const custom = JSON.parse(localStorage.getItem('gadnic_custom_cats') || '[]');
-  const merged = { ...CONFIG.categorias };
-  for (const cat of custom) {
-    merged[cat.id] = cat;
+// ── Field parsing from Sheet column headers ───────────────────────────────────
+const NUMERIC_UNITS = new Set([
+  'Pa','W','KW','KPA','L','ml','min','m','dB','kg','g','cm','mm',
+  'rpm','mAh','km','USD','ARS','EUR','pulg','Hz','MHz','GHz',
+  'V','A','Wh','TB','GB','MB','h','s','ms','lm','K','ppm'
+]);
+const FIXED_COLS = new Set([
+  'SKU','Nombre','Nivel','PVP_ARS','FOB_USD','Rentabilidad',
+  'Fuente','Fecha_actualizacion','imagen_url','diferenciadores'
+]);
+
+CONFIG.parseFieldFromColumn = function(colName) {
+  if (!colName || FIXED_COLS.has(colName)) return null;
+  const clean = colName.trim();
+  const id    = clean.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/__+/g,'_');
+
+  // Booleano: sufijo _SN
+  if (clean.endsWith('_SN')) {
+    const label = clean.slice(0, -3).replace(/_/g,' ');
+    return { id, label, tipo: 'booleano', req: false };
   }
-  return merged;
+
+  // Número: sufijo _Unidad donde Unidad es conocida
+  const parts    = clean.split('_');
+  const lastPart = parts[parts.length - 1];
+  if (parts.length > 1 && NUMERIC_UNITS.has(lastPart)) {
+    const label = parts.slice(0, -1).join(' ');
+    return { id, label, unidad: lastPart, tipo: 'numero', req: false };
+  }
+
+  // Texto: todo lo demás
+  const label = clean.replace(/_/g,' ');
+  return { id, label, tipo: 'texto', req: false };
+};
+
+// ── Dynamic category management ───────────────────────────────────────────────
+CONFIG.getAllCats = function() {
+  // Base categories from config.js
+  const all = { ...CONFIG.categorias };
+  // Custom categories from localStorage (Sheet-synced)
+  const custom = JSON.parse(localStorage.getItem('gadnic_custom_cats') || '[]');
+  for (const cat of custom) { all[cat.id] = cat; }
+  return all;
 };
 
 CONFIG.getCustomCats = function() {
@@ -109,7 +143,7 @@ CONFIG.saveCustomCats = function(cats) {
 };
 
 CONFIG.addCustomCat = function(cat) {
-  const cats = CONFIG.getCustomCats();
+  const cats    = CONFIG.getCustomCats();
   const existing = cats.findIndex(c => c.id === cat.id);
   if (existing >= 0) cats[existing] = cat;
   else cats.push(cat);
@@ -117,8 +151,7 @@ CONFIG.addCustomCat = function(cat) {
 };
 
 CONFIG.deleteCustomCat = function(catId) {
-  const cats = CONFIG.getCustomCats().filter(c => c.id !== catId);
-  CONFIG.saveCustomCats(cats);
+  CONFIG.saveCustomCats(CONFIG.getCustomCats().filter(c => c.id !== catId));
 };
 
 CONFIG.isBaseCat = function(catId) {
