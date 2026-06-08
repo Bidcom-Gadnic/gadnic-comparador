@@ -421,28 +421,48 @@ body {
 .cat-list-meta { font-size: 11px; color: var(--text-muted); }
 .cat-list-actions { display: flex; gap: 6px; }
 
-/* Campo rows in category modal */
+/* Campo rows — see extended rules below */
+
+
+/* ── Extended modal size ─────────────────────────────────────────────────── */
+.modal-xl { max-width: 960px; }
+
+/* ── Campo row — extended to 5 columns (label / unidad / tipo / req / del) ─ */
 .campos-header {
-  display: grid; grid-template-columns: 1fr .6fr .7fr .4fr;
+  display: grid; grid-template-columns: 1fr .55fr .65fr .5fr .3fr;
   gap: 8px; padding: 4px 8px;
   font-size: 11px; font-weight: 700; color: var(--text-muted);
   text-transform: uppercase; letter-spacing: .04em;
   margin-bottom: 6px;
 }
 .campo-row {
-  display: grid; grid-template-columns: 1fr .6fr .7fr .4fr auto;
+  display: grid; grid-template-columns: 1fr .55fr .65fr .5fr auto;
   gap: 8px; align-items: center; margin-bottom: 8px;
 }
-.campo-row input, .campo-row select {
-  background: var(--surface2); border: 1px solid var(--border);
-  color: var(--text); border-radius: var(--radius-sm);
-  padding: 6px 8px; font-family: inherit; font-size: 12px; width: 100%;
+/* AI-inferred rows get a subtle left accent */
+.campo-row--ai {
+  border-left: 2px solid var(--accent);
+  padding-left: 6px;
+  background: var(--accent-lt);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
-.campo-row input:focus, .campo-row select:focus {
-  outline: none; border-color: var(--accent);
+.campo-row--ai input, .campo-row--ai select {
+  background: white !important;
 }
-.campo-req-wrap {
-  display: flex; align-items: center; gap: 4px;
-  font-size: 12px; color: var(--text-muted); white-space: nowrap;
-  cursor: pointer;
+
+/* ── Drag-over state for file drop zone ──────────────────────────────────── */
+.file-import-box.drag-over {
+  border-color: var(--accent-dk);
+  background: var(--accent-lt);
+  transform: scale(1.01);
+  transition: all .15s;
 }
+
+/* ── AI spinner animation ─────────────────────────────────────────────────── */
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+.cat-ai-spinner { display: inline-block; animation: spin-slow 1.2s linear infinite; }
+
+/* ── Infer table rows ────────────────────────────────────────────────────── */
+.infer-row:hover td { background: var(--surface2); }
+.infer-row td { padding: 5px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.infer-row:last-child td { border-bottom: none; }
