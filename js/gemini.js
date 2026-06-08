@@ -366,7 +366,7 @@ Respondé SOLO con un array JSON válido, sin texto adicional ni backticks:
       text = await new Promise((res) => {
         reader.onload = (e) => {
           // Can't do much without a vision API — return filename hint
-          res('Imagen de producto: ' + file.name.replace(/[_-]/g,' ').replace(/\..+$',''));
+          res('Imagen de producto: ' + file.name.replace(/[_-]/g,' ').replace(/.[^.]+$/, ''));
         };
         reader.readAsDataURL(file);
       });
