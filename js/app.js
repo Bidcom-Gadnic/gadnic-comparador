@@ -1064,18 +1064,22 @@ const APP = {
     const isBase  = catId ? CONFIG.isBaseCat(catId) : false;
     const campos  = cat ? cat.campos : [];
 
-    const camposHTML = campos.map((f, i) => {
+    const camposHTML = campos.map((f) => {
       const unidad = f.unidad || '';
       const label  = f.label || '';
       const tipo   = f.tipo || 'texto';
+      const reqChk = f.req ? 'checked' : '';
       return '<div class="campo-row">' +
         '<input type="text" class="campo-label" value="' + label + '" placeholder="Nombre" ' + (isBase?'disabled':'') + '>' +
-        '<input type="text" class="campo-unidad" value="' + unidad + '" placeholder="Pa, W, SN..." ' + (isBase?'disabled':'') + '>' +
+        '<input type="text" class="campo-unidad" value="' + unidad + '" placeholder="Pa, W, °C..." ' + (isBase?'disabled':'') + '>' +
         '<select class="campo-tipo" ' + (isBase?'disabled':'') + '>' +
-        '<option value="texto"' + (tipo==='texto'?' selected':'') + '>Texto</option>' +
-        '<option value="numero"' + (tipo==='numero'?' selected':'') + '>Número</option>' +
-        '<option value="booleano"' + (tipo==='booleano'?' selected':'') + '>Sí/No</option>' +
+        '<option value="texto"'   + (tipo==='texto'  ?' selected':'') + '>Texto</option>' +
+        '<option value="numero"'  + (tipo==='numero' ?' selected':'') + '>Número</option>' +
+        '<option value="booleano"'+ (tipo==='booleano'?' selected':'') + '>Sí/No</option>' +
         '</select>' +
+        '<label class="campo-req-wrap" title="¿Campo requerido para comparar?">' +
+        '<input type="checkbox" class="campo-req" ' + reqChk + (isBase?' disabled':'') + '>' +
+        '<span>Req.</span></label>' +
         (!isBase ? '<button class="btn-icon btn-del" onclick="this.closest(\'.campo-row\').remove()">✕</button>' : '<span></span>') +
         '</div>';
     }).join('');
@@ -1083,30 +1087,292 @@ const APP = {
     const footer = isBase
       ? '<span style="font-size:12px;color:var(--text-muted)">Las categorías base no se modifican desde la app</span>'
       : '<button class="btn-ghost" onclick="APP.closeModal(\'cat-modal\')">Cancelar</button>' +
-        '<button class="btn-primary" onclick="APP.saveCat(\'' + (catId||'') + '\')">' + 'Guardar categoría</button>';
+        '<button class="btn-primary" onclick="APP.saveCat(\'' + (catId||'') + '\')">Guardar categoría</button>';
+
+    // ── AI import zone (only for new/custom categories) ───────────────────
+    const aiZone = isBase ? '' :
+      '<div class="form-section" id="cat-ai-zone">' +
+      '<h3>✨ Detectar specs con IA desde archivo</h3>' +
+      '<p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">' +
+      'Subí una ficha técnica, catálogo, planilla Excel, PDF o CSV. ' +
+      'La IA leerá el documento, identificará las especificaciones clave y completará los campos automáticamente. ' +
+      'Podés revisar y editar cada campo antes de guardar.</p>' +
+      '<div class="file-import-box" id="cat-drop-zone" ' +
+        'ondragover="event.preventDefault();this.classList.add(\'drag-over\')" ' +
+        'ondragleave="this.classList.remove(\'drag-over\')" ' +
+        'ondrop="event.preventDefault();this.classList.remove(\'drag-over\');APP._catFileInfer(event.dataTransfer.files[0])">' +
+        '<div class="fib-icon">🗂</div>' +
+        '<div class="fib-text">' +
+          '<strong>Arrastrar o seleccionar archivo</strong>' +
+          '<span>PDF · Excel (.xlsx) · CSV · TXT — la IA detecta las specs automáticamente</span>' +
+        '</div>' +
+        '<input type="file" id="cat-file-input" accept=".pdf,.xlsx,.xls,.csv,.txt,.jpg,.jpeg,.png" ' +
+          'style="display:none" onchange="APP._catFileInfer(this.files[0])">' +
+        '<button class="btn-ai" onclick="document.getElementById(\'cat-file-input\').click()">Seleccionar</button>' +
+      '</div>' +
+      '<div id="cat-ai-status" style="display:none"></div>' +
+      '</div>';
 
     document.body.insertAdjacentHTML('beforeend',
       '<div class="modal-overlay" id="cat-modal">' +
-      '<div class="modal-box modal-lg">' +
+      '<div class="modal-box modal-xl">' +
       '<div class="modal-head">' +
       '<h2>' + (cat ? 'Editar: ' + cat.nombre : 'Nueva categoría') + '</h2>' +
       '<button class="modal-close" onclick="APP.closeModal(\'cat-modal\')">✕</button>' +
       '</div><div class="modal-body">' +
+
+      // Name + emoji row
       '<div class="form-grid-2" style="margin-bottom:20px">' +
       '<div class="form-group"><label>Nombre *</label>' +
       '<input type="text" id="cat-nombre" value="' + (cat?.nombre||'') + '" placeholder="ej. Smartwatch" ' + (isBase?'disabled':'') + '></div>' +
       '<div class="form-group"><label>Emoji</label>' +
       '<input type="text" id="cat-emoji" value="' + (cat?.emoji||'') + '" placeholder="⌚" maxlength="2" ' + (isBase?'disabled':'') + '></div>' +
       '</div>' +
+
+      // AI zone
+      aiZone +
+
+      // Specs list header
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
       '<h3 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">Specs técnicas</h3>' +
-      (!isBase ? '<button class="btn-ghost" style="font-size:12px" onclick="APP._addCampoRow()">+ Agregar spec</button>' : '') +
+      (!isBase ?
+        '<div style="display:flex;gap:8px">' +
+        '<button class="btn-ghost" style="font-size:12px" onclick="APP._addCampoRow()">+ Agregar spec</button>' +
+        '</div>'
+        : '') +
       '</div>' +
-      '<div class="campos-header"><span>Nombre del campo</span><span>Unidad / SN</span><span>Tipo</span><span></span></div>' +
+      '<div class="campos-header">' +
+        '<span>Nombre del campo</span>' +
+        '<span>Unidad</span>' +
+        '<span>Tipo</span>' +
+        '<span>Req.</span>' +
+        '<span></span>' +
+      '</div>' +
       '<div id="campos-list">' + camposHTML + '</div>' +
+
       '</div>' +
       '<div class="modal-foot">' + footer + '</div>' +
       '</div></div>');
+  },
+
+  // ── AI file inference pipeline for category fields ────────────────────────
+  async _catFileInfer(file) {
+    if (!file) return;
+
+    const statusEl = document.getElementById('cat-ai-status');
+    const dropZone = document.getElementById('cat-drop-zone');
+
+    const setStatus = (msg, type = 'info') => {
+      statusEl.style.display = 'block';
+      statusEl.className     = 'gen-status ' + type;
+      statusEl.innerHTML     = msg;
+    };
+
+    // Check API key
+    const { geminiKey } = DB.getSettings();
+    if (!geminiKey) {
+      setStatus('⚠ Configurá tu API Key en ⚙️ Config antes de usar la detección con IA.', 'error');
+      return;
+    }
+
+    // Disable drop zone during processing
+    if (dropZone) dropZone.style.pointerEvents = 'none';
+    setStatus('<span style="display:flex;align-items:center;gap:8px">' +
+      '<span class="cat-ai-spinner">⏳</span>' +
+      '<span>Leyendo <strong>' + file.name + '</strong>…</span></span>', 'info');
+
+    try {
+      // Step 1: Extract text from file
+      const { text, preview } = await GEMINI.extractTextFromFile(file);
+
+      setStatus('<span style="display:flex;align-items:center;gap:8px">' +
+        '<span class="cat-ai-spinner">🤖</span>' +
+        '<span>Analizando especificaciones con IA…</span></span>', 'info');
+
+      // Step 2: Get category context hint from name field
+      const catContext = (document.getElementById('cat-nombre')?.value || '').trim();
+
+      // Step 3: Ask AI to infer fields
+      const campos = await GEMINI.inferFieldsFromFile(text, catContext);
+
+      if (!campos.length) throw new Error('No se encontraron especificaciones en el documento.');
+
+      // Step 4: Show preview of inferred fields
+      this._renderInferredFields(campos, preview, file.name);
+
+    } catch(e) {
+      setStatus('⚠ ' + e.message, 'error');
+    } finally {
+      if (dropZone) dropZone.style.pointerEvents = '';
+    }
+  },
+
+  // ── Render inferred fields as a preview with accept/reject controls ────────
+  _renderInferredFields(campos, docPreview, fileName) {
+    const statusEl = document.getElementById('cat-ai-status');
+    if (!statusEl) return;
+
+    // Group: required first, then optional
+    const req = campos.filter(f => f.req);
+    const opt = campos.filter(f => !f.req);
+
+    const renderRow = (f, i) => {
+      const tipoIcon = f.tipo === 'numero' ? '🔢' : f.tipo === 'booleano' ? '✅' : '📝';
+      const reqBadge = f.req
+        ? '<span style="font-size:10px;background:#dcfce7;color:#166534;padding:1px 6px;border-radius:10px;font-weight:700">REQ</span>'
+        : '<span style="font-size:10px;background:var(--surface3);color:var(--text-muted);padding:1px 6px;border-radius:10px">opt</span>';
+      return '<tr class="infer-row" data-i="' + i + '">' +
+        '<td><input type="checkbox" class="infer-chk" data-i="' + i + '" checked></td>' +
+        '<td>' + tipoIcon + '</td>' +
+        '<td><input type="text" class="infer-label" data-i="' + i + '" value="' + f.label + '" ' +
+          'style="border:none;background:transparent;font-weight:600;font-size:12px;width:100%;color:var(--text)" ' +
+          'onchange="APP._updateInferredField(' + i + ',\'label\',this.value)"></td>' +
+        '<td><input type="text" class="infer-unidad" data-i="' + i + '" value="' + (f.unidad||'') + '" ' +
+          'style="border:none;background:transparent;font-size:12px;width:60px;color:var(--text-muted);text-align:center" ' +
+          'placeholder="–" onchange="APP._updateInferredField(' + i + ',\'unidad\',this.value)"></td>' +
+        '<td>' +
+          '<select class="infer-tipo" data-i="' + i + '" style="border:none;background:transparent;font-size:12px;color:var(--text-muted)" ' +
+          'onchange="APP._updateInferredField(' + i + ',\'tipo\',this.value)">' +
+          '<option value="numero"'  + (f.tipo==='numero'  ?' selected':'') + '>Número</option>' +
+          '<option value="texto"'   + (f.tipo==='texto'   ?' selected':'') + '>Texto</option>' +
+          '<option value="booleano"'+ (f.tipo==='booleano'?' selected':'') + '>Sí/No</option>' +
+          '</select>' +
+        '</td>' +
+        '<td>' + reqBadge + '</td>' +
+        '</tr>';
+    };
+
+    // Store inferred fields globally for merge step
+    this.state._inferredCampos = campos;
+
+    const totalReq = req.length;
+    const totalOpt = opt.length;
+
+    statusEl.className     = 'gen-status success';
+    statusEl.style.display = 'block';
+    statusEl.innerHTML =
+      '<div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">' +
+        '<div>' +
+          '<strong style="font-size:13px">✅ ' + campos.length + ' specs detectadas</strong>' +
+          ' <span style="font-size:11px;color:var(--text-muted)">desde ' + fileName + '</span>' +
+          '<div style="font-size:11px;margin-top:2px;color:var(--text-muted)">' +
+            totalReq + ' requeridas · ' + totalOpt + ' opcionales' +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="btn-ghost" style="font-size:12px;padding:6px 12px" ' +
+            'onclick="document.querySelectorAll(\'.infer-chk\').forEach(c=>c.checked=true)">' +
+            'Seleccionar todas</button>' +
+          '<button class="btn-ghost" style="font-size:12px;padding:6px 12px" ' +
+            'onclick="document.querySelectorAll(\'.infer-chk\').forEach(c=>c.checked=false)">' +
+            'Deseleccionar</button>' +
+        '</div>' +
+      '</div>' +
+
+      // Doc preview strip
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;' +
+        'padding:8px 12px;font-size:11px;color:var(--text-muted);margin-bottom:12px;' +
+        'max-height:56px;overflow:hidden;font-family:monospace;line-height:1.4" ' +
+        'title="Texto extraído del documento">' +
+        docPreview.replace(/</g,'&lt;').replace(/>/g,'&gt;') +
+      '</div>' +
+
+      // Fields table
+      '<div style="max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface)">' +
+      '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+      '<thead><tr style="background:var(--surface2);border-bottom:1px solid var(--border)">' +
+        '<th style="padding:7px 10px;text-align:center;width:32px">' +
+          '<input type="checkbox" id="infer-all" checked ' +
+            'onclick="document.querySelectorAll(\'.infer-chk\').forEach(c=>c.checked=this.checked)">' +
+        '</th>' +
+        '<th style="padding:7px 4px;width:24px"></th>' +
+        '<th style="padding:7px 10px;text-align:left;font-weight:700;color:var(--text-muted);font-size:11px;text-transform:uppercase">Nombre del campo</th>' +
+        '<th style="padding:7px 10px;text-align:center;font-weight:700;color:var(--text-muted);font-size:11px;text-transform:uppercase">Unidad</th>' +
+        '<th style="padding:7px 10px;text-align:center;font-weight:700;color:var(--text-muted);font-size:11px;text-transform:uppercase">Tipo</th>' +
+        '<th style="padding:7px 10px;text-align:center;font-weight:700;color:var(--text-muted);font-size:11px;text-transform:uppercase">Req.</th>' +
+      '</tr></thead>' +
+      '<tbody>' +
+        (req.length ? '<tr><td colspan="6" style="padding:4px 10px;background:#f0fdf4;font-size:10px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:.04em">Specs requeridas</td></tr>' : '') +
+        req.map((f, i) => renderRow(f, campos.indexOf(f))).join('') +
+        (opt.length ? '<tr><td colspan="6" style="padding:4px 10px;background:var(--surface2);font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em">Specs opcionales</td></tr>' : '') +
+        opt.map((f, i) => renderRow(f, campos.indexOf(f))).join('') +
+      '</tbody>' +
+      '</table></div>' +
+
+      // Action buttons
+      '<div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end">' +
+        '<button class="btn-ghost" style="font-size:12px" ' +
+          'onclick="document.getElementById(\'cat-ai-status\').style.display=\'none\';APP.state._inferredCampos=null">' +
+          'Descartar</button>' +
+        '<button class="btn-primary" onclick="APP._mergeInferredCampos()">' +
+          '➕ Agregar specs seleccionadas al formulario</button>' +
+      '</div>';
+  },
+
+  // ── Keep inferred fields in sync as user edits them inline ───────────────
+  _updateInferredField(i, key, value) {
+    if (this.state._inferredCampos && this.state._inferredCampos[i]) {
+      this.state._inferredCampos[i][key] = value;
+    }
+  },
+
+  // ── Merge selected inferred campos into the campos-list form ─────────────
+  _mergeInferredCampos() {
+    const campos   = this.state._inferredCampos || [];
+    const checks   = document.querySelectorAll('.infer-chk');
+    const selected = campos.filter((_, i) => checks[i]?.checked);
+
+    if (!selected.length) {
+      this.showToast('Seleccioná al menos una spec.', 'warn');
+      return;
+    }
+
+    // Read existing labels to avoid exact duplicates
+    const existing = new Set();
+    document.querySelectorAll('.campo-row .campo-label').forEach(el => {
+      if (el.value.trim()) existing.add(el.value.trim().toLowerCase());
+    });
+
+    let added = 0, skipped = 0;
+    const list = document.getElementById('campos-list');
+
+    for (const f of selected) {
+      if (existing.has(f.label.toLowerCase())) { skipped++; continue; }
+
+      // Read back potentially edited values from the table
+      const row = document.createElement('div');
+      row.className = 'campo-row campo-row--ai'; // extra class for visual distinction
+
+      const tipoOpts =
+        '<option value="numero"'  + (f.tipo==='numero'  ?' selected':'') + '>Número</option>' +
+        '<option value="texto"'   + (f.tipo==='texto'   ?' selected':'') + '>Texto</option>' +
+        '<option value="booleano"'+ (f.tipo==='booleano'?' selected':'') + '>Sí/No</option>';
+
+      row.innerHTML =
+        '<input type="text" class="campo-label" value="' + f.label.replace(/"/g,'&quot;') + '" placeholder="Nombre">' +
+        '<input type="text" class="campo-unidad" value="' + (f.unidad||'') + '" placeholder="Pa, W, °C...">' +
+        '<select class="campo-tipo">' + tipoOpts + '</select>' +
+        '<label class="campo-req-wrap" title="Campo requerido">' +
+          '<input type="checkbox" class="campo-req"' + (f.req?' checked':'') + '>' +
+          '<span>Req.</span>' +
+        '</label>' +
+        '<button class="btn-icon btn-del" onclick="this.closest(\'.campo-row\').remove()">✕</button>';
+
+      list.appendChild(row);
+      existing.add(f.label.toLowerCase());
+      added++;
+    }
+
+    // Hide the AI preview panel
+    const statusEl = document.getElementById('cat-ai-status');
+    if (statusEl) statusEl.style.display = 'none';
+    this.state._inferredCampos = null;
+
+    // Scroll campos-list into view
+    list.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+    const msg = added + ' specs agregadas' + (skipped ? ' (' + skipped + ' ya existían, omitidas)' : '') + '.';
+    this.showToast(msg, 'success');
   },
 
   _addCampoRow() {
@@ -1114,12 +1380,13 @@ const APP = {
     row.className = 'campo-row';
     row.innerHTML =
       '<input type="text" class="campo-label" placeholder="ej. Pantalla">' +
-      '<input type="text" class="campo-unidad" placeholder="pulg / SN / vacío">' +
+      '<input type="text" class="campo-unidad" placeholder="pulg / W / vacío">' +
       '<select class="campo-tipo">' +
       '<option value="texto">Texto</option>' +
       '<option value="numero">Número</option>' +
       '<option value="booleano">Sí/No</option>' +
       '</select>' +
+      '<label class="campo-req-wrap"><input type="checkbox" class="campo-req"><span>Req.</span></label>' +
       '<button class="btn-icon btn-del" onclick="this.closest(\'.campo-row\').remove()">✕</button>';
     document.getElementById('campos-list').appendChild(row);
   },
@@ -1131,17 +1398,20 @@ const APP = {
 
     const campos = [];
     document.querySelectorAll('.campo-row').forEach(row => {
-      const label  = row.querySelector('.campo-label').value.trim();
+      const label  = row.querySelector('.campo-label')?.value.trim();
       if (!label) return;
-      const unidad = row.querySelector('.campo-unidad').value.trim();
-      const tipo   = row.querySelector('.campo-tipo').value;
-      // Auto-detect type from unidad hint
+      const unidad = row.querySelector('.campo-unidad')?.value.trim() || '';
+      const tipo   = row.querySelector('.campo-tipo')?.value || 'texto';
+      const req    = row.querySelector('.campo-req')?.checked || false;
+
+      // Auto-detect type from unidad hint (SN = booleano, any known unit = numero)
       let finalTipo = tipo;
-      if (unidad === 'SN')  finalTipo = 'booleano';
-      if (unidad && unidad !== 'SN') finalTipo = 'numero';
+      if (unidad === 'SN') finalTipo = 'booleano';
+      else if (unidad && unidad !== 'SN') finalTipo = 'numero';
+
       const id = label.toLowerCase().replace(/[^a-z0-9]/g,'_').replace(/__+/g,'_') +
                  (unidad && unidad !== 'SN' ? '_' + unidad.toLowerCase() : unidad === 'SN' ? '_sn' : '');
-      campos.push({ id, label, unidad: unidad&&unidad!=='SN'?unidad:undefined, tipo: finalTipo, req: false });
+      campos.push({ id, label, unidad: unidad&&unidad!=='SN'?unidad:undefined, tipo: finalTipo, req });
     });
 
     if (!campos.length) { this.showToast('Agregá al menos una spec.', 'error'); return; }
@@ -1151,8 +1421,6 @@ const APP = {
     const cat       = { id, nombre, emoji, sheetName, niveles: ['Entry','Mid','High','Premium'], campos };
 
     CONFIG.addCustomCat(cat);
-
-    // Create sheet tab in background
     DB.createCategorySheet(cat).catch(()=>{});
     DB.pushCategories().catch(()=>{});
 

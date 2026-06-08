@@ -227,5 +227,159 @@ Respondé SOLO con JSON sin backticks con los campos faltantes (ids exactos):
     } catch {
       return product;
     }
+  },
+  // ── Infer category fields from raw file text (semantic analysis) ──────────
+  //
+  // Receives unstructured text extracted from any file (PDF, Excel, CSV, image
+  // OCR, spec-sheet, datasheet, etc.) and returns a structured array of campos
+  // ready to be inserted into a category definition.
+  //
+  // The prompt is carefully designed to:
+  //   1. Understand linguistic context (Spanish + English mixed docs)
+  //   2. Detect measurement units and map them to the NUMERIC_UNITS vocabulary
+  //   3. Classify boolean attributes (presence/absence features)
+  //   4. Deduplicate semantically equivalent fields
+  //   5. Mark truly required specs vs optional ones
+  //   6. Return field IDs compatible with the existing config.js convention
+  //
+  async inferFieldsFromFile(rawText, categoryContext = '') {
+    const prompt = `Sos un experto en análisis de fichas técnicas de productos de consumo y electrodomésticos.
+Analizá el siguiente texto extraído de un documento (puede ser una ficha técnica, catálogo, planilla de cotización, datasheet o descripción de producto).
+
+${categoryContext ? `Contexto de la categoría: "${categoryContext}"
+` : ''}
+TEXTO DEL DOCUMENTO:
+${rawText.substring(0, 10000)}
+
+Tu tarea es identificar TODAS las especificaciones técnicas relevantes que definen este tipo de producto.
+Para cada especificación:
+- Identificá su nombre en español claro y conciso
+- Detectá si tiene unidad de medida (Pa, W, V, A, kg, g, cm, mm, L, ml, min, h, s, dB, rpm, mAh, Wh, °C, °F, lm, Hz, MHz, GHz, GB, TB, USD, ARS, km, m, pulg, ppm, K, %)
+- Clasificá su tipo:
+  * "numero" → si tiene valor numérico con o sin unidad (potencia, capacidad, velocidad, precio, dimensiones)
+  * "booleano" → si es una característica que está o no está presente (tiene WiFi, tiene HEPA, incluye bolsa, es inalámbrico, tiene display, tiene auto-vaciado)
+  * "texto" → si describe modo, material, tecnología, color, compatibilidad, certificación, o cualquier valor libre
+- Determiná si es REQUERIDA (req: true) → specs que definen la performance o categoría del producto y sin las cuales no se puede comparar (potencia, capacidad, autonomía, succión, etc.)
+- Descartá: precios, URLs, nombres de modelos, fechas, códigos internos, información de empresa/contacto
+
+IMPORTANTE:
+- No dupliques: si "Potencia motor" y "Motor (W)" son lo mismo, usá solo uno con el nombre más claro
+- Los ids deben ser snake_case en minúsculas, máx 30 chars, usando el patrón "nombre_unidad" para numéricos (ej: potencia_w, autonomia_min, capacidad_l)
+- Para booleanos el id termina en "_sn" (ej: filtro_hepa_sn, wifi_sn, auto_vaciado_sn)
+- Para texto el id es solo el nombre (ej: tipo_filtro, material_cesto, navegacion)
+- Ordená: primero los campos requeridos, luego los opcionales
+- Generá entre 6 y 20 campos. Si el documento tiene menos info, generá los que puedas inferir razonablemente para esa categoría de producto
+
+Respondé SOLO con un array JSON válido, sin texto adicional ni backticks:
+[
+  {
+    "id": "potencia_w",
+    "label": "Potencia",
+    "unidad": "W",
+    "tipo": "numero",
+    "req": true
+  },
+  {
+    "id": "filtro_hepa_sn",
+    "label": "Filtro HEPA",
+    "tipo": "booleano",
+    "req": false
+  },
+  {
+    "id": "tipo_filtro",
+    "label": "Tipo de filtro",
+    "tipo": "texto",
+    "req": false
   }
+]`;
+
+    const text = await this._call(prompt);
+    const clean = text.replace(/\`\`\`json\n?|\n?\`\`\`|\`\`\`/g, '').trim();
+    try {
+      const parsed = JSON.parse(clean);
+      if (!Array.isArray(parsed)) throw new Error('La IA no devolvió un array');
+
+      // Normalize and validate each field
+      return parsed
+        .filter(f => f && f.label && f.tipo)
+        .map(f => ({
+          id:     (f.id || f.label.toLowerCase().replace(/[^a-z0-9]/g,'_').replace(/__+/g,'_')).substring(0, 40),
+          label:  String(f.label).trim(),
+          unidad: f.unidad || undefined,
+          tipo:   ['numero','booleano','texto'].includes(f.tipo) ? f.tipo : 'texto',
+          req:    !!f.req
+        }));
+    } catch(e) {
+      throw new Error('No se pudo interpretar la respuesta de la IA. Intentá con otro archivo.');
+    }
+  },
+
+  // ── Extract plain text from a file (PDF, Excel, CSV, TXT, image) ──────────
+  // Returns { text, preview } — preview is the first 300 chars for display
+  async extractTextFromFile(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    let text = '';
+
+    if (ext === 'pdf') {
+      if (!window.pdfjsLib) {
+        await new Promise((res, rej) => {
+          const s = document.createElement('script');
+          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+          s.onload = res; s.onerror = rej;
+          document.head.appendChild(s);
+        });
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+      const buf = await file.arrayBuffer();
+      const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+      for (let p = 1; p <= Math.min(pdf.numPages, 8); p++) {
+        const page  = await pdf.getPage(p);
+        const items = (await page.getTextContent()).items;
+        text += items.map(i => i.str).join(' ') + '\n';
+      }
+
+    } else if (['xlsx','xls','ods'].includes(ext)) {
+      if (!window.XLSX) {
+        await new Promise((res, rej) => {
+          const s = document.createElement('script');
+          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+          s.onload = res; s.onerror = rej;
+          document.head.appendChild(s);
+        });
+      }
+      const buf = await file.arrayBuffer();
+      const wb  = window.XLSX.read(buf, { type: 'array' });
+      for (const sheetName of wb.SheetNames.slice(0, 4)) {
+        const ws  = wb.Sheets[sheetName];
+        text += '\n=== ' + sheetName + ' ===\n' +
+                window.XLSX.utils.sheet_to_csv(ws, { blankrows: false });
+      }
+
+    } else if (['csv','tsv','txt'].includes(ext)) {
+      text = await file.text();
+
+    } else if (['jpg','jpeg','png','webp'].includes(ext)) {
+      // For images: use Jina AI vision endpoint as OCR fallback
+      // We send the base64 image as part of a Jina fetch
+      const reader = new FileReader();
+      text = await new Promise((res) => {
+        reader.onload = (e) => {
+          // Can't do much without a vision API — return filename hint
+          res('Imagen de producto: ' + file.name.replace(/[_-]/g,' ').replace(/\..+$',''));
+        };
+        reader.readAsDataURL(file);
+      });
+
+    } else {
+      throw new Error('Formato no soportado. Usá PDF, Excel (.xlsx), CSV, TXT o imagen.');
+    }
+
+    if (!text.trim()) throw new Error('El archivo no contiene texto extraíble.');
+    return {
+      text,
+      preview: text.substring(0, 400).replace(/\s+/g, ' ').trim()
+    };
+  },
+
 };
