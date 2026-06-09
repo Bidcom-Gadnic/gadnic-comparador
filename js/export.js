@@ -411,6 +411,106 @@ ${body}
     URL.revokeObjectURL(a.href);
   },
 
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FORMAT C — COTIZACIONES STANDALONE REPORT
+  // ═══════════════════════════════════════════════════════════════════════════
+  generateCotizacion(scored, refSpecs, row) {
+    const sku    = row['SKU'] || '–';
+    const desc   = row['Descripción'] || '';
+    const target = row['Target price'] || '';
+    const winner = scored[0];
+    const fecha  = new Date().toLocaleDateString('es-AR', { day:'2-digit', month:'long', year:'numeric' });
+
+    const scoreColor = s => s >= 70 ? '#059669' : s >= 45 ? '#d97706' : '#dc2626';
+
+    const rowsHTML = scored.map((c, i) => `
+      <tr style="${i===0 ? 'background:#f0fdf4;font-weight:600' : ''}">
+        <td style="text-align:center;font-size:18px">${i===0?'🥇':i===1?'🥈':i===2?'🥉':'#'+(i+1)}</td>
+        <td><div style="font-weight:700">${c.proveedor}</div>
+            ${c.modelo?`<div style="font-size:10px;color:#64748b">${c.modelo}</div>`:''}</td>
+        <td style="text-align:center;font-weight:700">${c.fob_num?'USD '+c.fob_num:'–'}</td>
+        <td style="text-align:center">${c.moq||'–'}</td>
+        <td style="text-align:center">${c.lead_time?c.lead_time+' días':'–'}</td>
+        <td style="text-align:center">
+          <div style="background:#e2e8f0;border-radius:4px;height:8px;width:80px;display:inline-block;overflow:hidden">
+            <div style="height:100%;width:${c.tech_score||0}%;background:${scoreColor(c.tech_score||0)};border-radius:4px"></div>
+          </div>
+          <span style="font-size:10px;margin-left:4px">${c.tech_score||0}%</span>
+        </td>
+        <td style="text-align:center;font-size:20px;font-weight:800;color:${scoreColor(c.score)}">${c.score}%</td>
+        <td style="font-size:11px">
+          ${(c.ventajas||[]).slice(0,2).map(v=>`<div style="color:#059669">✅ ${v}</div>`).join('')}
+          ${(c.gaps||[]).slice(0,1).map(g=>`<div style="color:#dc2626;margin-top:2px">⚠ ${g}</div>`).join('')}
+        </td>
+      </tr>`).join('');
+
+    return `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cotizaciones ${sku} — Gadnic/Bidcom</title>
+<style>
+  *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI',sans-serif; font-size:13px; color:#1e293b; background:#f8fafc; padding:24px; }
+  @media print { body { padding:0; background:white; } }
+  .header { background:#0f172a; color:white; padding:20px 24px; border-radius:10px; margin-bottom:20px; }
+  .header h1 { font-size:20px; font-weight:800; margin-bottom:4px; }
+  .header p { color:#94a3b8; font-size:12px; }
+  .winner { background:linear-gradient(135deg,#0d2137,#0d3b1f); border:2px solid #10b981;
+            border-radius:10px; padding:20px 24px; margin-bottom:20px; }
+  .winner-label { font-size:10px; font-weight:700; color:#10b981; letter-spacing:.08em;
+                  text-transform:uppercase; margin-bottom:6px; }
+  .winner-name { font-size:22px; font-weight:800; color:white; margin-bottom:8px; }
+  .winner-meta { display:flex; gap:16px; flex-wrap:wrap; font-size:12px; color:#94a3b8; margin-bottom:8px; }
+  .winner-meta strong { color:white; }
+  .winner-score { font-size:28px; font-weight:900; color:#10b981; }
+  .winner-summary { font-size:12px; color:#94a3b8; margin-top:8px; line-height:1.5; }
+  .ref-box { background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px;
+             padding:14px 18px; margin-bottom:20px; font-size:12px; line-height:1.7; }
+  .ref-box h4 { font-size:11px; font-weight:700; text-transform:uppercase;
+                letter-spacing:.04em; color:#1d4ed8; margin-bottom:8px; }
+  table { width:100%; border-collapse:collapse; background:white; border-radius:10px;
+          overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,.06); }
+  thead { background:#0f172a; color:white; }
+  th { padding:10px 12px; text-align:left; font-size:11px; font-weight:600; letter-spacing:.04em; }
+  td { padding:10px 12px; border-bottom:1px solid #e2e8f0; vertical-align:middle; }
+  tr:last-child td { border-bottom:none; }
+  .footer { margin-top:20px; text-align:center; font-size:10px; color:#94a3b8; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>📋 Comparativa de Cotizaciones — SKU ${sku}</h1>
+    <p>${desc} · ${scored.length} cotizaciones evaluadas · ${fecha}${target?' · Target: '+target:''}</p>
+  </div>
+  <div class="winner">
+    <div class="winner-label">🏆 Mejor cotización</div>
+    <div class="winner-name">${winner.proveedor}${winner.modelo?' — '+winner.modelo:''}</div>
+    <div class="winner-meta">
+      ${winner.fob_num?`<span>💰 FOB <strong>USD ${winner.fob_num}</strong></span>`:''}
+      ${winner.moq?`<span>📦 MOQ <strong>${winner.moq} uds.</strong></span>`:''}
+      ${winner.lead_time?`<span>⚡ Lead time <strong>${winner.lead_time} días</strong></span>`:''}
+    </div>
+    <div class="winner-score">${winner.score}% score final</div>
+    ${winner.resumen?`<div class="winner-summary">${winner.resumen}</div>`:''}
+  </div>
+  ${refSpecs?.specs?`<div class="ref-box"><h4>🔗 Specs del producto de referencia</h4>${refSpecs.specs}</div>`:''}
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Proveedor</th><th>FOB USD</th><th>MOQ</th>
+        <th>Lead time</th><th>Tech match</th><th>Score</th><th>Análisis</th>
+      </tr>
+    </thead>
+    <tbody>${rowsHTML}</tbody>
+  </table>
+  <div class="footer">Gadnic / Bidcom · Generado el ${fecha}</div>
+</body>
+</html>`;
+  },
+
   generate(comp, formato) {
     return formato === 'tabla'
       ? this.generateTable(comp)

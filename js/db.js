@@ -1,6 +1,6 @@
 // ─── GADNIC COMPARADOR · DATA LAYER ───────────────────────────────────────────
 const DB = {
-  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwflGG6FtVtOm-tLp4pxbKg8-DFhujTUx15qS4vH3ypU7gYUIfTznrqCFDhaIksQVh7/exec',
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbzdBxKrqWILMYXx4YWN8ZFfg7qpFLx3LUKQwabf_PH-QGGgOP_wEHcFUiqGL2hieO5h/exec',
   _key: (k) => `gadnic_${k}`,
 
   // ── Settings ──────────────────────────────────────────────────────────────
@@ -123,6 +123,11 @@ const DB = {
     const url = this.APPS_SCRIPT_URL + '?' + new URLSearchParams(params);
     const res = await fetch(url);
     return res.json();
+  },
+
+  // ── Extract text from a Drive file via Apps Script ────────────────────────
+  async extractDriveFile(fileUrl) {
+    return this._get({ action: 'extractFile', fileUrl });
   },
 
   async _post(body) {

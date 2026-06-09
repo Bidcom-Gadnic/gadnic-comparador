@@ -62,7 +62,7 @@ const APP = {
   },
 
   render() {
-    const sections = ['catalogo','nueva','indice','config'];
+    const sections = ['catalogo','nueva','indice','config','cotizaciones'];
     sections.forEach(s => {
       document.getElementById(`sec-${s}`).style.display =
         s === this.state.section ? 'block' : 'none';
@@ -72,7 +72,8 @@ const APP = {
       case 'catalogo': this.renderCatalog(); break;
       case 'nueva':    this.renderWizard();  break;
       case 'indice':   this.renderIndex();   break;
-      case 'config':   this.renderConfig();  break;
+      case 'config':       this.renderConfig();       break;
+      case 'cotizaciones': this.renderCotizaciones(); break;
     }
   },
 
@@ -1794,7 +1795,531 @@ const APP = {
     document.getElementById('toast-area').appendChild(t);
     setTimeout(() => t.classList.add('show'), 10);
     setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 3500);
-  }
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MÓDULO COTIZACIONES
+  // Lee CentralCotizaciones del Sheet, extrae cotizaciones 1-5 por SKU,
+  // analiza cada una con IA contra el link de referencia y genera un ranking.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  renderCotizaciones() {
+    const s = DB.getSettings();
+    const sheetId = s.sheetId || CONFIG.sheetId;
+
+    document.getElementById('sec-cotizaciones').innerHTML = `
+      <div class="sec-head">
+        <h2>🔍 Comparador de Cotizaciones</h2>
+        <div style="display:flex;gap:8px">
+          <button class="btn-ghost" onclick="APP.cotLoad()">↓ Cargar desde Sheet</button>
+        </div>
+      </div>
+
+      <div class="cot-layout">
+
+        <!-- LEFT: search + list -->
+        <div class="cot-sidebar">
+          <div class="form-group" style="margin-bottom:12px">
+            <label style="font-size:11px;font-weight:700;text-transform:uppercase;
+                          letter-spacing:.04em;color:var(--text-muted)">Buscar SKU</label>
+            <input type="text" id="cot-search" placeholder="Escribí el SKU o descripción…"
+              oninput="APP.cotFilter(this.value)"
+              style="width:100%;margin-top:6px">
+          </div>
+          <div id="cot-sku-list" class="cot-sku-list">
+            <div class="cot-empty">Cargá el Sheet para ver los SKUs disponibles.</div>
+          </div>
+        </div>
+
+        <!-- RIGHT: analysis panel -->
+        <div class="cot-main" id="cot-main">
+          <div class="cot-placeholder">
+            <div style="font-size:48px;margin-bottom:16px">🔍</div>
+            <h3 style="color:var(--text-muted);font-weight:500">
+              Seleccioná un SKU para analizar sus cotizaciones
+            </h3>
+            <p style="color:var(--text-dim);font-size:12px;margin-top:8px">
+              La IA va a leer cada cotización y la va a comparar contra el link de referencia
+            </p>
+          </div>
+        </div>
+
+      </div>`;
+
+    // Auto-load if we already have rows cached
+    if (this.state.cotRows && this.state.cotRows.length) {
+      this._cotRenderList(this.state.cotRows);
+    }
+  },
+
+  // ── Load CentralCotizaciones via Apps Script (works with private Sheets) ───
+  async cotLoad() {
+    this.showToast('Cargando CentralCotizaciones…', 'info');
+
+    const listEl = document.getElementById('cot-sku-list');
+    if (listEl) listEl.innerHTML = '<div class="cot-empty" style="text-align:center">⏳ Cargando…</div>';
+
+    try {
+      // Use Apps Script readExternal action — bypasses gviz auth restriction
+      const data = await DB._get({
+        action:  'readExternal',
+        sheetId: '1ByagWe7qIzHE_-bCXzg9cMNxZdkg-Sqokd1oZkONx0I',
+        sheet:   'CentralCotizaciones'
+      });
+
+      if (data.error) throw new Error(data.error);
+      const rows = data.rows || [];
+      if (!rows.length) throw new Error('No se encontraron filas en CentralCotizaciones.');
+
+      // Filter rows that have at least one cotización URL
+      const valid = rows.filter(r =>
+        r['SKU'] &&
+        (r['Cotización 1'] || r['Cotización 2'] || r['Cotización 3'] ||
+         r['Cotización 4'] || r['Cotización 5'])
+      );
+
+      if (!valid.length) throw new Error('No hay filas con cotizaciones en el Sheet.');
+
+      this.state.cotRows = valid;
+      this.state.cotFiltered = valid;
+      this._cotRenderList(valid);
+      this.showToast(`${valid.length} SKUs con cotizaciones cargados.`, 'success');
+    } catch(e) {
+      this.showToast('Error: ' + e.message, 'error');
+      if (listEl) listEl.innerHTML = '<div class="cot-empty" style="color:var(--danger)">⚠ ' + e.message + '</div>';
+    }
+  },
+
+  // ── Render SKU list in sidebar ────────────────────────────────────────────
+  _cotRenderList(rows) {
+    const listEl = document.getElementById('cot-sku-list');
+    if (!listEl) return;
+
+    if (!rows.length) {
+      listEl.innerHTML = '<div class="cot-empty">Sin resultados.</div>';
+      return;
+    }
+
+    listEl.innerHTML = rows.map((r, i) => {
+      const sku   = r['SKU'] || '–';
+      const desc  = r['Descripción'] || '';
+      const cat   = r['Category'] || '';
+      const nCot  = [1,2,3,4,5].filter(n => r[`Cotización ${n}`]).length;
+      const prio  = r['Prioridad'] || '';
+      const prioClass = prio === 'Alta' ? 'prio-alta' : prio === 'Media' ? 'prio-media' : 'prio-baja';
+      return `<div class="cot-sku-item" data-i="${i}" onclick="APP.cotSelectSKU(${i})">
+        <div class="cot-sku-top">
+          <span class="sku-text">${sku}</span>
+          ${prio ? `<span class="cot-prio ${prioClass}">${prio}</span>` : ''}
+        </div>
+        <div class="cot-sku-desc">${desc.substring(0,60)}${desc.length>60?'…':''}</div>
+        <div class="cot-sku-meta">${cat ? cat + ' · ' : ''}${nCot} cotización${nCot!==1?'es':''}</div>
+      </div>`;
+    }).join('');
+  },
+
+  // ── Filter SKU list ───────────────────────────────────────────────────────
+  cotFilter(query) {
+    const rows = this.state.cotRows || [];
+    const q    = query.toLowerCase();
+    const filtered = q
+      ? rows.filter(r =>
+          (r['SKU']||'').toLowerCase().includes(q) ||
+          (r['Descripción']||'').toLowerCase().includes(q) ||
+          (r['Category']||'').toLowerCase().includes(q))
+      : rows;
+    this._cotRenderList(filtered);
+    // Store filtered indices mapping
+    this.state.cotFiltered = filtered;
+  },
+
+  // ── Select a SKU and show analysis panel ─────────────────────────────────
+  cotSelectSKU(i) {
+    const rows = this.state.cotFiltered || this.state.cotRows || [];
+    const row  = rows[i];
+    if (!row) return;
+
+    // Highlight selected
+    document.querySelectorAll('.cot-sku-item').forEach((el, idx) => {
+      el.classList.toggle('active', idx === i);
+    });
+
+    this.state.cotSelected = row;
+    this._cotRenderPanel(row);
+  },
+
+  // ── Render the right-side analysis panel for a SKU ───────────────────────
+  _cotRenderPanel(row) {
+    const mainEl = document.getElementById('cot-main');
+    if (!mainEl) return;
+
+    const sku      = row['SKU'] || '–';
+    const desc     = row['Descripción'] || '';
+    const linkRef  = row['Link de Referencia'] || '';
+    const target   = row['Target price'] || '';
+    const qty      = row['Cantidad estimada'] || '';
+    const obs      = row['Observaciones'] || '';
+    const analista = row['Analista Sourcing'] || '';
+
+    // Build cotizaciones array (only non-empty ones)
+    const cots = [1,2,3,4,5]
+      .map(n => ({
+        n,
+        url:       row[`Cotización ${n}`] || '',
+        fob:       row[`FOB ${n}`] || row[`FOB TPO ${n === 4 ? '1 SIMPLE' : n === 5 ? '2 KRIS' : n}`] || '',
+        proveedor: row[`Proveedor ${n}`] || `Cotización ${n}`,
+        modelo:    row[`Modelo ${n}`] || '',
+      }))
+      .filter(c => c.url);
+
+    mainEl.innerHTML = `
+      <div class="cot-panel">
+
+        <!-- SKU Header -->
+        <div class="cot-panel-head">
+          <div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+              <span class="sku-text" style="font-size:14px">${sku}</span>
+              ${analista ? `<span style="font-size:11px;color:var(--text-muted)">Sourcing: ${analista}</span>` : ''}
+            </div>
+            <h3 style="font-size:16px;font-weight:700;color:var(--text)">${desc}</h3>
+          </div>
+          <div class="cot-panel-meta">
+            ${target ? `<div class="cot-meta-pill">🎯 Target: <strong>${target}</strong></div>` : ''}
+            ${qty    ? `<div class="cot-meta-pill">📦 Qty est.: <strong>${qty}</strong></div>` : ''}
+            ${cots.length ? `<div class="cot-meta-pill">📋 <strong>${cots.length}</strong> cotizaciones</div>` : ''}
+          </div>
+        </div>
+
+        <!-- Reference link -->
+        ${linkRef ? `
+        <div class="cot-ref-box">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                      letter-spacing:.04em;color:var(--text-muted);margin-bottom:4px">
+            🔗 Link de Referencia
+          </div>
+          <a href="${linkRef}" target="_blank" class="cot-ref-link">${linkRef}</a>
+        </div>` : '<div class="cot-ref-box" style="border-color:var(--warn)">⚠ Sin link de referencia en el Sheet.</div>'}
+
+        <!-- Observations -->
+        ${obs ? `<div class="cot-obs-box">📝 ${obs}</div>` : ''}
+
+        <!-- Scoring weights -->
+        <div class="cot-weights-box">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                      letter-spacing:.04em;color:var(--text-muted);margin-bottom:12px">
+            ⚖️ Ponderación del scoring
+          </div>
+          <div class="cot-weights-grid">
+            <div class="cot-weight-item">
+              <label>💰 Precio FOB</label>
+              <input type="range" id="w-precio" min="0" max="100" value="35"
+                oninput="document.getElementById('w-precio-val').textContent=this.value+'%'">
+              <span id="w-precio-val">35%</span>
+            </div>
+            <div class="cot-weight-item">
+              <label>🔬 Match técnico</label>
+              <input type="range" id="w-specs" min="0" max="100" value="40"
+                oninput="document.getElementById('w-specs-val').textContent=this.value+'%'">
+              <span id="w-specs-val">40%</span>
+            </div>
+            <div class="cot-weight-item">
+              <label>📦 MOQ</label>
+              <input type="range" id="w-moq" min="0" max="100" value="15"
+                oninput="document.getElementById('w-moq-val').textContent=this.value+'%'">
+              <span id="w-moq-val">15%</span>
+            </div>
+            <div class="cot-weight-item">
+              <label>⚡ Lead time</label>
+              <input type="range" id="w-lead" min="0" max="100" value="10"
+                oninput="document.getElementById('w-lead-val').textContent=this.value+'%'">
+              <span id="w-lead-val">10%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cotizaciones list -->
+        <div style="margin-bottom:14px">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                      letter-spacing:.04em;color:var(--text-muted);margin-bottom:10px">
+            📋 Cotizaciones encontradas (${cots.length})
+          </div>
+          ${cots.map(c => `
+            <div class="cot-item-row">
+              <div class="cot-item-info">
+                <span class="sku-text" style="font-size:11px">Cot. ${c.n}</span>
+                <span style="font-size:12px;font-weight:600">${c.proveedor}</span>
+                ${c.modelo ? `<span style="font-size:11px;color:var(--text-muted)">${c.modelo}</span>` : ''}
+                ${c.fob    ? `<span class="cot-fob-badge">FOB ${c.fob}</span>` : ''}
+              </div>
+              <a href="${c.url}" target="_blank" class="btn-ghost"
+                style="font-size:11px;padding:4px 10px">↗ Ver archivo</a>
+            </div>`).join('')}
+        </div>
+
+        <!-- Action button -->
+        <button class="btn-primary" style="width:100%;padding:12px;font-size:14px"
+          onclick="APP.cotRunAnalysis()">
+          ✨ Analizar y comparar con IA
+        </button>
+
+        <!-- Results area -->
+        <div id="cot-results" style="margin-top:20px"></div>
+
+      </div>`;
+  },
+
+  // ── Run full AI analysis on all cotizaciones ──────────────────────────────
+  async cotRunAnalysis() {
+    const row = this.state.cotSelected;
+    if (!row) return;
+
+    const resultsEl = document.getElementById('cot-results');
+    if (!resultsEl) return;
+
+    // Read weights
+    const wPrecio = parseInt(document.getElementById('w-precio')?.value || 35);
+    const wSpecs  = parseInt(document.getElementById('w-specs')?.value  || 40);
+    const wMoq    = parseInt(document.getElementById('w-moq')?.value    || 15);
+    const wLead   = parseInt(document.getElementById('w-lead')?.value   || 10);
+    const totalW  = wPrecio + wSpecs + wMoq + wLead || 1;
+
+    const linkRef = row['Link de Referencia'] || '';
+    const target  = parseFloat(String(row['Target price'] || '0').replace(/[^0-9.]/g,'')) || 0;
+    const cots    = [1,2,3,4,5]
+      .map(n => ({
+        n,
+        url:       row[`Cotización ${n}`] || '',
+        fob:       row[`FOB ${n}`] || '',
+        proveedor: row[`Proveedor ${n}`] || `Cotización ${n}`,
+        modelo:    row[`Modelo ${n}`] || '',
+      }))
+      .filter(c => c.url);
+
+    const setStatus = (msg) => {
+      resultsEl.innerHTML = `
+        <div class="gen-status info" style="display:flex;align-items:center;gap:10px">
+          <span style="animation:spin-slow 1s linear infinite;display:inline-block">⏳</span>
+          <span>${msg}</span>
+        </div>`;
+    };
+
+    try {
+      // Step 1: Extract reference specs
+      setStatus('Analizando link de referencia…');
+      const refSpecs = linkRef
+        ? await GEMINI.extractRefSpecs(linkRef)
+        : { specs: 'Sin referencia', precio_ref: 0 };
+
+      // Step 2: Analyze each cotización
+      const analyzed = [];
+      for (const c of cots) {
+        setStatus(`Analizando cotización ${c.n} de ${cots.length} — ${c.proveedor}…`);
+        try {
+          const data = await GEMINI.analyzeCotizacion(c.url, refSpecs, c.fob);
+          analyzed.push({ ...c, ...data, ok: true });
+        } catch(e) {
+          analyzed.push({ ...c, ok: false, error: e.message,
+            fob_num: parseFloat(String(c.fob).replace(/[^0-9.]/g,'')) || 0,
+            moq: 0, lead_time: 0, tech_score: 0, resumen: 'No se pudo analizar.' });
+        }
+      }
+
+      // Step 3: Normalize and score
+      setStatus('Calculando scores…');
+      const scored = this._cotScore(analyzed, target, wPrecio, wSpecs, wMoq, wLead, totalW);
+
+      // Step 4: Render results
+      this._cotRenderResults(scored, refSpecs, row);
+
+    } catch(e) {
+      resultsEl.innerHTML = `<div class="gen-status error">⚠ ${e.message}</div>`;
+    }
+  },
+
+  // ── Score all cotizaciones ────────────────────────────────────────────────
+  _cotScore(analyzed, target, wPrecio, wSpecs, wMoq, wLead, totalW) {
+    const normalize = (vals, invert = false) => {
+      const nums = vals.map(Number).filter(v => !isNaN(v) && v > 0);
+      if (!nums.length) return vals.map(() => 0.5);
+      const mn = Math.min(...nums), mx = Math.max(...nums);
+      return vals.map(v => {
+        const n = v > 0 && mx !== mn ? (Number(v) - mn) / (mx - mn) : v > 0 ? 0.5 : 0;
+        return invert ? 1 - n : n;
+      });
+    };
+
+    const fobs   = analyzed.map(c => c.fob_num  || parseFloat(String(c.fob||'0').replace(/[^0-9.]/g,'')) || 0);
+    const moqs   = analyzed.map(c => c.moq   || 0);
+    const leads  = analyzed.map(c => c.lead_time || 0);
+    const techs  = analyzed.map(c => (c.tech_score || 0) / 100);
+
+    // Price: if target given, score = how close to target (lower = better)
+    const nFob  = normalize(fobs,  true);   // lower FOB = better
+    const nMoq  = normalize(moqs,  true);   // lower MOQ = better
+    const nLead = normalize(leads, true);   // lower lead = better
+    const nTech = techs;                    // higher tech = better
+
+    return analyzed.map((c, i) => {
+      const score = (
+        nFob[i]  * wPrecio +
+        nTech[i] * wSpecs  +
+        nMoq[i]  * wMoq    +
+        nLead[i] * wLead
+      ) / totalW * 100;
+
+      return {
+        ...c,
+        fob_num:    fobs[i],
+        score:      Math.round(score * 10) / 10,
+        n_fob:      Math.round(nFob[i]  * 100),
+        n_tech:     Math.round(nTech[i] * 100),
+        n_moq:      Math.round(nMoq[i]  * 100),
+        n_lead:     Math.round(nLead[i] * 100),
+      };
+    }).sort((a, b) => b.score - a.score);
+  },
+
+  // ── Render final results ──────────────────────────────────────────────────
+  _cotRenderResults(scored, refSpecs, row) {
+    const resultsEl = document.getElementById('cot-results');
+    if (!resultsEl) return;
+
+    const winner  = scored[0];
+    const sku     = row['SKU'] || '–';
+    const target  = row['Target price'] || '';
+
+    // ── Winner card ───────────────────────────────────────────────────────
+    const winnerHTML = `
+      <div class="cot-winner-card">
+        <div class="cot-winner-label">🏆 MEJOR COTIZACIÓN</div>
+        <div class="cot-winner-name">${winner.proveedor}</div>
+        <div class="cot-winner-meta">
+          ${winner.fob_num ? `<span>💰 FOB <strong>USD ${winner.fob_num}</strong></span>` : ''}
+          ${winner.moq     ? `<span>📦 MOQ <strong>${winner.moq} uds.</strong></span>` : ''}
+          ${winner.lead_time ? `<span>⚡ Lead <strong>${winner.lead_time} días</strong></span>` : ''}
+          ${winner.modelo  ? `<span>🏷 <strong>${winner.modelo}</strong></span>` : ''}
+        </div>
+        <div class="cot-winner-score">Score: ${winner.score}%</div>
+        ${winner.resumen ? `<div class="cot-winner-summary">${winner.resumen}</div>` : ''}
+        ${winner.url ? `<a href="${winner.url}" target="_blank" class="btn-ghost" style="font-size:12px;margin-top:10px;display:inline-block">↗ Ver cotización completa</a>` : ''}
+      </div>`;
+
+    // ── Ref specs summary ─────────────────────────────────────────────────
+    const refHTML = refSpecs.specs ? `
+      <div class="cot-ref-specs">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                    letter-spacing:.04em;color:var(--text-muted);margin-bottom:8px">
+          🔗 Specs del producto de referencia
+        </div>
+        <div style="font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap">${refSpecs.specs}</div>
+      </div>` : '';
+
+    // ── Ranking table ─────────────────────────────────────────────────────
+    const rowsHTML = scored.map((c, i) => {
+      const isWinner = i === 0;
+      const scoreColor = c.score >= 70 ? '#059669' : c.score >= 45 ? '#d97706' : '#dc2626';
+      return `
+        <tr class="${isWinner ? 'cot-row-winner' : ''}">
+          <td style="text-align:center;font-weight:800;font-size:16px">${isWinner ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i+1)}</td>
+          <td>
+            <div style="font-weight:600">${c.proveedor}</div>
+            ${c.modelo ? `<div style="font-size:11px;color:var(--text-muted)">${c.modelo}</div>` : ''}
+          </td>
+          <td style="text-align:center;font-weight:700">
+            ${c.fob_num ? `USD ${c.fob_num}` : '<span class="nd">–</span>'}
+          </td>
+          <td style="text-align:center">${c.moq || '<span class="nd">–</span>'}</td>
+          <td style="text-align:center">${c.lead_time ? c.lead_time + ' días' : '<span class="nd">–</span>'}</td>
+          <td style="text-align:center">
+            <div class="cot-score-bar-wrap">
+              <div class="cot-score-bar" style="width:${c.tech_score||0}%;background:${scoreColor}"></div>
+              <span>${c.tech_score || 0}%</span>
+            </div>
+          </td>
+          <td style="text-align:center">
+            <div style="font-size:18px;font-weight:800;color:${scoreColor}">${c.score}%</div>
+            <div style="display:flex;gap:3px;justify-content:center;margin-top:3px">
+              <div class="cot-mini-bar" style="width:${c.n_fob}%;background:#6366f1" title="Precio"></div>
+              <div class="cot-mini-bar" style="width:${c.n_tech}%;background:#059669" title="Técnico"></div>
+              <div class="cot-mini-bar" style="width:${c.n_moq}%;background:#f59e0b" title="MOQ"></div>
+              <div class="cot-mini-bar" style="width:${c.n_lead}%;background:#0ea5e9" title="Lead"></div>
+            </div>
+          </td>
+          <td>
+            ${c.ok
+              ? (c.ventajas?.length ? `<div style="font-size:11px;color:#059669">✅ ${c.ventajas.slice(0,2).join(' · ')}</div>` : '')
+              + (c.gaps?.length    ? `<div style="font-size:11px;color:#dc2626;margin-top:2px">⚠ ${c.gaps.slice(0,1).join('')}</div>` : '')
+              : `<div style="font-size:11px;color:var(--danger)">⚠ ${c.error}</div>`}
+          </td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = winnerHTML + refHTML + `
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                  letter-spacing:.04em;color:var(--text-muted);margin:20px 0 10px">
+        📊 Ranking completo
+      </div>
+      <div class="table-scroll">
+        <table class="data-table" style="font-size:12px">
+          <thead>
+            <tr>
+              <th style="text-align:center">#</th>
+              <th>Proveedor</th>
+              <th style="text-align:center">FOB USD</th>
+              <th style="text-align:center">MOQ</th>
+              <th style="text-align:center">Lead</th>
+              <th style="text-align:center">Tech match</th>
+              <th style="text-align:center">Score final</th>
+              <th>Ventajas / Gaps</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHTML}</tbody>
+        </table>
+      </div>
+      <div style="margin-top:16px;display:flex;gap:10px">
+        <button class="btn-primary" onclick="APP.cotExport()">⬇ Exportar HTML</button>
+        <button class="btn-ghost" onclick="APP.cotCopyToComp()">➕ Crear comparativa completa</button>
+      </div>`;
+
+    // Store for export
+    this.state.cotLastResult = { scored, refSpecs, row };
+  },
+
+  // ── Export results as standalone HTML ────────────────────────────────────
+  cotExport() {
+    const { scored, refSpecs, row } = this.state.cotLastResult || {};
+    if (!scored) return;
+
+    const sku  = row['SKU'] || 'cotizacion';
+    const html = EXPORT.generateCotizacion(scored, refSpecs, row);
+    EXPORT.downloadHTML(html, `cotizacion_${sku}_${new Date().toISOString().slice(0,10)}.html`);
+    this.showToast('HTML exportado.', 'success');
+  },
+
+  // ── Send winner + all cotizaciones to the comparison wizard ──────────────
+  cotCopyToComp() {
+    const { scored, row } = this.state.cotLastResult || {};
+    if (!scored) return;
+
+    // Map to wizard externos format
+    const externos = scored.map(c => ({
+      nombre:    c.proveedor,
+      sku:       c.modelo || '',
+      fob_usd:   c.fob_num || '',
+      fuente:    c.url,
+      ...c.specs_obj,
+    }));
+
+    this.state.wizard = {
+      step: 1, catId: null, tipo: 'vs_cotizacion',
+      propios: [], externos, analisis: null,
+      nombre: `Cotizaciones ${row['SKU']}`, formato: 'tarjetas'
+    };
+    this.go('nueva');
+    this.showToast('Cotizaciones cargadas en el wizard.', 'success');
+  },
+
 };
 
 document.addEventListener('DOMContentLoaded', () => APP.init());

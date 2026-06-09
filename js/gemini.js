@@ -382,4 +382,120 @@ Respondé SOLO con un array JSON válido, sin texto adicional ni backticks:
     };
   },
 
+  // ── Extract specs from a reference product URL ────────────────────────────
+  async extractRefSpecs(url) {
+    const jinaUrl = `https://r.jina.ai/${url}`;
+    let pageText  = '';
+    try {
+      const res  = await fetch(jinaUrl, {
+        headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
+      });
+      pageText = (await res.text()).substring(0, 8000);
+    } catch(e) {
+      pageText = `URL: ${url}`;
+    }
+
+    const prompt = `Sos un analista de productos de consumo para Argentina.
+Analizá el siguiente contenido de una página de producto de referencia y extraé las specs técnicas clave.
+
+CONTENIDO:
+${pageText}
+
+Respondé SOLO con JSON válido, sin backticks:
+{
+  "nombre": "nombre del producto",
+  "precio_ref": null,
+  "specs": "lista de specs técnicas en texto libre, una por línea",
+  "specs_obj": {
+    "campo_clave": "valor"
+  },
+  "diferenciadores": "qué hace único a este producto"
+}`;
+
+    const text   = await this._call(prompt);
+    return this._parseJSON(text);
+  },
+
+  // ── Analyze a cotización URL and compare against reference specs ───────────
+  // For Google Drive URLs: uses Apps Script to extract file content server-side
+  // For other URLs: uses Jina Reader as fallback
+  async analyzeCotizacion(url, refSpecs, fobHint = '') {
+    let pageText = '';
+
+    const isDrive = url && (
+      url.includes('drive.google.com') ||
+      url.includes('docs.google.com/spreadsheets') ||
+      url.includes('docs.google.com/document')
+    );
+
+    if (isDrive) {
+      // Use Apps Script to extract file content — works with private Drive files
+      try {
+        const data = await DB._get({ action: 'extractFile', fileUrl: url });
+        if (data.ok && data.text) {
+          pageText = data.text;
+        } else if (data.error) {
+          console.warn('Drive extract error:', data.error);
+        }
+      } catch(e) {
+        console.warn('Apps Script extractFile failed:', e.message);
+      }
+    }
+
+    // Fallback to Jina for non-Drive URLs or if Apps Script failed
+    if (!pageText) {
+      try {
+        const jinaUrl = `https://r.jina.ai/${url}`;
+        const res     = await fetch(jinaUrl, {
+          headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
+        });
+        if (res.ok) pageText = (await res.text()).substring(0, 8000);
+      } catch(e) { /* fall through with empty text */ }
+    }
+
+    const refText = typeof refSpecs === 'object'
+      ? (refSpecs.specs || JSON.stringify(refSpecs))
+      : String(refSpecs);
+
+    const prompt = `Sos un analista de compras internacionales para Argentina.
+Analizá esta cotización de proveedor y comparala contra el producto de referencia.
+
+PRODUCTO DE REFERENCIA:
+${refText}
+
+CONTENIDO DE LA COTIZACIÓN (puede ser texto de PDF, Excel o página web):
+${pageText || `URL: ${url}${fobHint ? ' — FOB indicado: ' + fobHint : ''}`}
+
+Extraé la información de la cotización y evaluá qué tan bien cumple los requisitos de la referencia.
+
+Respondé SOLO con JSON válido, sin backticks:
+{
+  "proveedor": "nombre del proveedor o empresa",
+  "modelo": "modelo o SKU del producto cotizado",
+  "fob_num": null,
+  "moq": null,
+  "lead_time": null,
+  "payment_terms": "",
+  "tech_score": 0,
+  "resumen": "1-2 frases del análisis general",
+  "ventajas": ["ventaja 1", "ventaja 2"],
+  "gaps": ["gap 1", "gap 2"],
+  "specs_obj": {
+    "spec_clave": "valor"
+  }
+}
+
+Notas:
+- fob_num: precio FOB como número (solo el número, sin USD ni texto)${fobHint ? '. El Sheet indica FOB: ' + fobHint : ''}
+- moq: cantidad mínima de orden como número
+- lead_time: días de producción como número
+- tech_score: 0-100, qué tan bien cumple las specs de la referencia
+- ventajas: qué tiene de bueno vs la referencia (máx 3)
+- gaps: qué le falta vs la referencia (máx 3)
+- Si no encontrás un dato, usá null`;
+
+    const text = await this._call(prompt);
+    return this._parseJSON(text);
+  },
+
 };
