@@ -382,18 +382,15 @@ Respondé SOLO con un array JSON válido, sin texto adicional ni backticks:
     };
   },
 
-  // ── Extract specs from a reference product URL ────────────────────────────
+  // ── Extract specs from reference URL ─────────────────────────────────────
   async extractRefSpecs(url) {
-    const jinaUrl = `https://r.jina.ai/${url}`;
-    let pageText  = '';
+    let pageText = '';
     try {
-      const res  = await fetch(jinaUrl, {
+      const res = await fetch(`https://r.jina.ai/${url}`, {
         headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
       });
       pageText = (await res.text()).substring(0, 8000);
-    } catch(e) {
-      pageText = `URL: ${url}`;
-    }
+    } catch(e) { pageText = `URL: ${url}`; }
 
     const prompt = `Sos un analista de productos de consumo para Argentina.
 Analizá el siguiente contenido de una página de producto de referencia y extraé las specs técnicas clave.
@@ -405,97 +402,254 @@ Respondé SOLO con JSON válido, sin backticks:
 {
   "nombre": "nombre del producto",
   "precio_ref": null,
-  "specs": "lista de specs técnicas en texto libre, una por línea",
-  "specs_obj": {
-    "campo_clave": "valor"
-  },
+  "specs": "resumen de specs en texto libre",
+  "specs_obj": { "spec_clave": "valor" },
   "diferenciadores": "qué hace único a este producto"
 }`;
 
-    const text   = await this._call(prompt);
+    const text = await this._call(prompt);
     return this._parseJSON(text);
   },
 
-  // ── Analyze a cotización URL and compare against reference specs ───────────
-  // For Google Drive URLs: uses Apps Script to extract file content server-side
-  // For other URLs: uses Jina Reader as fallback
-  async analyzeCotizacion(url, refSpecs, fobHint = '') {
-    let pageText = '';
+  // ── Extract 7 fixed logistics fields from file text ─────────────────────
+  async extractLogistics(fileText, fobHint = '') {
+    const prompt = `Sos un analista de compras internacionales especializado en cotizaciones de proveedores chinos.
+Extraé los datos logísticos del siguiente texto de cotización.
 
-    const isDrive = url && (
-      url.includes('drive.google.com') ||
-      url.includes('docs.google.com/spreadsheets') ||
-      url.includes('docs.google.com/document')
-    );
+TEXTO:
+${fileText.substring(0, 6000)}
+${fobHint ? `\nEl campo FOB del sistema indica: ${fobHint}` : ''}
 
-    if (isDrive) {
-      // Use Apps Script to extract file content — works with private Drive files
-      try {
-        const data = await DB._get({ action: 'extractFile', fileUrl: url });
-        if (data.ok && data.text) {
-          pageText = data.text;
-        } else if (data.error) {
-          console.warn('Drive extract error:', data.error);
-        }
-      } catch(e) {
-        console.warn('Apps Script extractFile failed:', e.message);
-      }
-    }
+Extraé EXACTAMENTE estos 7 campos. Si un dato no está presente usá null.
+Para lead_time extraé solo el número de días.
+Para fob_num extraé solo el número (sin USD ni texto).
+Para ctn_size extraé en formato "LxWxH" con las dimensiones en cm.
 
-    // Fallback to Jina for non-Drive URLs or if Apps Script failed
-    if (!pageText) {
-      try {
-        const jinaUrl = `https://r.jina.ai/${url}`;
-        const res     = await fetch(jinaUrl, {
-          headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
-        });
-        if (res.ok) pageText = (await res.text()).substring(0, 8000);
-      } catch(e) { /* fall through with empty text */ }
-    }
-
-    const refText = typeof refSpecs === 'object'
-      ? (refSpecs.specs || JSON.stringify(refSpecs))
-      : String(refSpecs);
-
-    const prompt = `Sos un analista de compras internacionales para Argentina.
-Analizá esta cotización de proveedor y comparala contra el producto de referencia.
-
-PRODUCTO DE REFERENCIA:
-${refText}
-
-CONTENIDO DE LA COTIZACIÓN (puede ser texto de PDF, Excel o página web):
-${pageText || `URL: ${url}${fobHint ? ' — FOB indicado: ' + fobHint : ''}`}
-
-Extraé la información de la cotización y evaluá qué tan bien cumple los requisitos de la referencia.
-
-Respondé SOLO con JSON válido, sin backticks:
+Respondé SOLO con JSON válido, sin backticks ni texto adicional:
 {
-  "proveedor": "nombre del proveedor o empresa",
-  "modelo": "modelo o SKU del producto cotizado",
   "fob_num": null,
-  "moq": null,
+  "puerto": "",
+  "ctn_size": "",
+  "ctn_weight": null,
+  "pcs_ctn": null,
   "lead_time": null,
   "payment_terms": "",
-  "tech_score": 0,
-  "resumen": "1-2 frases del análisis general",
-  "ventajas": ["ventaja 1", "ventaja 2"],
-  "gaps": ["gap 1", "gap 2"],
-  "specs_obj": {
-    "spec_clave": "valor"
-  }
-}
-
-Notas:
-- fob_num: precio FOB como número (solo el número, sin USD ni texto)${fobHint ? '. El Sheet indica FOB: ' + fobHint : ''}
-- moq: cantidad mínima de orden como número
-- lead_time: días de producción como número
-- tech_score: 0-100, qué tan bien cumple las specs de la referencia
-- ventajas: qué tiene de bueno vs la referencia (máx 3)
-- gaps: qué le falta vs la referencia (máx 3)
-- Si no encontrás un dato, usá null`;
+  "modelo": "",
+  "tech_score": 0
+}`;
 
     const text = await this._call(prompt);
     return this._parseJSON(text);
+  },
+
+  // ── Extract tech specs from file text ────────────────────────────────────
+  async extractTechSpecs(fileText, productDesc, refSpecs) {
+    const refContext = refSpecs?.specs_obj
+      ? `Specs del producto de referencia: ${JSON.stringify(refSpecs.specs_obj)}`
+      : refSpecs?.specs || '';
+
+    const prompt = `Sos un analista de productos de consumo.
+Extraé TODAS las especificaciones técnicas del siguiente texto de cotización de proveedor.
+
+DESCRIPCIÓN DEL PRODUCTO: ${productDesc}
+${refContext ? `\n${refContext}` : ''}
+
+TEXTO DE LA COTIZACIÓN:
+${fileText.substring(0, 6000)}
+
+Reglas:
+- Extraé solo specs técnicas del producto (no datos logísticos como FOB, CTN, lead time)
+- Normalizá los nombres de specs en español
+- Incluí valores con sus unidades
+- Si una spec aparece con nombre diferente al de referencia pero es lo mismo, usá el nombre de referencia
+
+Respondé SOLO con JSON válido, sin backticks:
+{
+  "Material principal": "valor o null",
+  "Dimensiones": "valor o null",
+  "Capacidad": "valor o null",
+  "...otras specs que encuentres": "valor"
+}`;
+
+    try {
+      const text = await this._call(prompt);
+      return this._parseJSON(text);
+    } catch(e) {
+      return {};
+    }
+  },
+
+  // ── Normalize specs across all cotizaciones ───────────────────────────────
+  // Returns only specs present in >= 2 cotizaciones (no noise)
+  async normalizeSpecs(allTechSpecs, cotCount) {
+    if (!allTechSpecs.length) return { normalizedSpecs: [], specsTable: [] };
+
+    const allKeys = allTechSpecs.flatMap(s => Object.keys(s));
+    const keyCounts = {};
+    allKeys.forEach(k => { keyCounts[k] = (keyCounts[k]||0) + 1; });
+
+    // Pre-filter: only keys in >= 2 cotizaciones
+    const candidates = Object.entries(keyCounts)
+      .filter(([k,v]) => v >= Math.min(2, cotCount))
+      .map(([k]) => k);
+
+    if (!candidates.length) {
+      // fallback: use all keys if few cotizaciones
+      return {
+        normalizedSpecs: allTechSpecs,
+        specsTable: [...new Set(allKeys)].slice(0, 15)
+      };
+    }
+
+    // Ask AI to normalize spec names (unify synonyms)
+    const prompt = `Sos un experto en normalización de datos de productos.
+Tenés estas especificaciones técnicas extraídas de múltiples cotizaciones del mismo producto.
+
+Specs encontradas (con cantidad de cotizaciones que las mencionan):
+${JSON.stringify(keyCounts, null, 2)}
+
+Specs a normalizar (aparecen en 2+ cotizaciones):
+${candidates.join(', ')}
+
+Respondé SOLO con JSON válido, sin backticks:
+{
+  "tabla_specs": ["Nombre normalizado 1", "Nombre normalizado 2", ...],
+  "mapeo": {
+    "nombre_original": "Nombre normalizado",
+    "otro_nombre_original": "Nombre normalizado"
+  }
+}
+
+Reglas:
+- Unificá sinónimos (ej: "Material cuerpo" y "Body material" → "Material")
+- Usá nombres en español, concisos
+- Máximo 15 specs en tabla_specs
+- Solo incluí specs que aporten valor comparativo real`;
+
+    try {
+      const text   = await this._call(prompt);
+      const result = this._parseJSON(text);
+      const mapeo  = result.mapeo || {};
+
+      // Apply normalization to each cotización's specs
+      const normalizedSpecs = allTechSpecs.map(specs => {
+        const norm = {};
+        Object.entries(specs).forEach(([k, v]) => {
+          const normKey = mapeo[k] || k;
+          if (!norm[normKey]) norm[normKey] = v;
+        });
+        return norm;
+      });
+
+      return {
+        normalizedSpecs,
+        specsTable: result.tabla_specs || candidates.slice(0, 15)
+      };
+    } catch(e) {
+      return { normalizedSpecs: allTechSpecs, specsTable: candidates.slice(0, 15) };
+    }
+  },
+
+  // ── Detect product category ───────────────────────────────────────────────
+  async detectCategory(productDesc, specsTable, existingCats) {
+    const catList = Object.values(existingCats).map(c =>
+      `- id: "${c.id}", nombre: "${c.nombre}", emoji: "${c.emoji||'📦'}", campos: [${(c.campos||[]).map(f=>f.label).join(', ')}]`
+    ).join('\n');
+
+    const prompt = `Sos un experto en categorización de productos de consumo.
+
+PRODUCTO: ${productDesc}
+SPECS DETECTADAS: ${Array.isArray(specsTable) ? specsTable.join(', ') : JSON.stringify(specsTable)}
+
+CATEGORÍAS EXISTENTES:
+${catList || 'Ninguna todavía'}
+
+Determiná a qué categoría pertenece este producto.
+Si coincide con una existente, usá su id.
+Si es nueva, sugerí nombre, emoji y campos.
+
+Respondé SOLO con JSON válido, sin backticks:
+{
+  "existing_cat_id": null,
+  "suggested_name": "Nombre de categoría",
+  "suggested_id": "id_snake_case",
+  "suggested_emoji": "📦",
+  "suggested_campos": [
+    { "label": "Nombre campo", "tipo": "texto|numero|booleano", "unidad": "", "req": true }
+  ],
+  "reasoning": "Por qué esta categoría"
+}
+
+Si coincide con existente, pon su id en existing_cat_id y dejá los campos suggested vacíos.`;
+
+    try {
+      const text = await this._call(prompt);
+      return this._parseJSON(text);
+    } catch(e) {
+      return { existing_cat_id: null, suggested_name: productDesc, suggested_id: 'nueva', reasoning: '' };
+    }
+  },
+
+  // ── Full benchmark analysis ───────────────────────────────────────────────
+  async benchmarkAnalysis(rawCots, refSpecs, specsTable, productDesc, catId) {
+    const cotsData = rawCots.map(c => ({
+      proveedor:   c.proveedor,
+      fob:         c.logistics?.fob_num,
+      puerto:      c.logistics?.puerto,
+      moq:         c.logistics?.moq,
+      lead_time:   c.logistics?.lead_time,
+      payment:     c.logistics?.payment_terms,
+      modelo:      c.logistics?.modelo,
+      ctn_size:    c.logistics?.ctn_size,
+      ctn_weight:  c.logistics?.ctn_weight,
+      pcs_ctn:     c.logistics?.pcs_ctn,
+      specs:       c.techNorm || c.techSpecs || {}
+    }));
+
+    const refContext = refSpecs?.specs_obj
+      ? JSON.stringify(refSpecs.specs_obj)
+      : refSpecs?.specs || 'Sin referencia';
+
+    const prompt = `Sos un analista senior de compras internacionales y desarrollo de productos para Argentina.
+
+PRODUCTO: ${productDesc}
+SPECS DE REFERENCIA (producto ideal):
+${refContext}
+
+COTIZACIONES A ANALIZAR:
+${JSON.stringify(cotsData, null, 2)}
+
+Generá un benchmark completo tanto técnico como de negocios.
+
+Respondé SOLO con JSON válido, sin backticks:
+{
+  "resumen_ejecutivo": "2-3 frases del panorama general",
+  "ventajas_por_proveedor": [
+    {
+      "proveedor": "nombre",
+      "ventajas": ["ventaja 1", "ventaja 2"],
+      "gaps": ["gap 1"],
+      "evaluacion_vs_referencia": "cumple|cumple_parcial|no_cumple"
+    }
+  ],
+  "gaps_criticos": [
+    { "descripcion": "", "afecta_a": ["proveedor1"], "urgencia": "alta|media|baja" }
+  ],
+  "recomendaciones": [
+    { "titulo": "", "descripcion": "" }
+  ],
+  "ranking_entre_cotizaciones": [
+    { "posicion": 1, "proveedor": "", "razon": "por qué es el mejor entre cotizaciones" }
+  ],
+  "oportunidades_negociacion": ["oportunidad 1", "oportunidad 2"]
+}`;
+
+    try {
+      const text = await this._call(prompt);
+      return this._parseJSON(text);
+    } catch(e) {
+      return null;
+    }
   },
 
 };

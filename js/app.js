@@ -2084,61 +2084,307 @@ const APP = {
     const wLead   = parseInt(document.getElementById('w-lead')?.value   || 10);
     const totalW  = wPrecio + wSpecs + wMoq + wLead || 1;
 
-    const linkRef = row['Link de Referencia'] || '';
-    const target  = parseFloat(String(row['Target price'] || '0').replace(/[^0-9.]/g,'')) || 0;
-    const cots    = [1,2,3,4,5]
+    const linkRef  = row['Link de Referencia'] || '';
+    const target   = parseFloat(String(row['Target price'] || '0').replace(/[^0-9.]/g,'')) || 0;
+    const desc     = row['Descripción'] || row['SKU'] || '';
+    const cots     = [1,2,3,4,5]
       .map(n => ({
         n,
         url:       row[`Cotización ${n}`] || '',
-        fob:       row[`FOB ${n}`] || '',
+        fob:       row[`FOB ${n}`] || row[`FOB TPO ${n===4?'1 SIMPLE':n===5?'2 KRIS':n}`] || '',
         proveedor: row[`Proveedor ${n}`] || `Cotización ${n}`,
         modelo:    row[`Modelo ${n}`] || '',
       }))
       .filter(c => c.url);
 
-    const setStatus = (msg) => {
+    // Progress tracker
+    const steps  = 2 + cots.length + 3; // ref + per-cot + normalize + category + benchmark
+    let   stepN  = 0;
+    const setStatus = (msg, pct) => {
+      stepN++;
+      const p = pct ?? Math.round(stepN / steps * 100);
       resultsEl.innerHTML = `
-        <div class="gen-status info" style="display:flex;align-items:center;gap:10px">
-          <span style="animation:spin-slow 1s linear infinite;display:inline-block">⏳</span>
-          <span>${msg}</span>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+            <span style="font-size:22px;animation:spin-slow 1.2s linear infinite;display:inline-block">⏳</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--text)">${msg}</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Paso ${stepN} de ${steps}</div>
+            </div>
+          </div>
+          <div style="background:var(--surface2);border-radius:4px;height:6px;overflow:hidden">
+            <div style="height:100%;width:${p}%;background:var(--accent);border-radius:4px;transition:width .4s"></div>
+          </div>
         </div>`;
     };
 
     try {
-      // Step 1: Extract reference specs
-      setStatus('Analizando link de referencia…');
+      // ── FASE 1: Referencia externa ─────────────────────────────────────
+      setStatus('Analizando producto de referencia…');
       const refSpecs = linkRef
         ? await GEMINI.extractRefSpecs(linkRef)
-        : { specs: 'Sin referencia', precio_ref: 0 };
+        : { nombre: desc, specs: '', specs_obj: {} };
 
-      // Step 2: Analyze each cotización
-      const analyzed = [];
+      // ── FASE 2: Extracción por cotización (logística + técnica) ────────
+      const rawCots = [];
       for (const c of cots) {
-        setStatus(`Analizando cotización ${c.n} de ${cots.length} — ${c.proveedor}…`);
+        setStatus(`Extrayendo datos de cotización ${c.n}/${cots.length} — ${c.proveedor}…`);
         try {
-          const data = await GEMINI.analyzeCotizacion(c.url, refSpecs, c.fob);
-          analyzed.push({ ...c, ...data, ok: true });
+          // Get file text via Apps Script
+          let fileText = '';
+          const isDrive = c.url && (
+            c.url.includes('drive.google.com') ||
+            c.url.includes('docs.google.com')
+          );
+          if (isDrive) {
+            const extracted = await DB._get({ action: 'extractFile', fileUrl: c.url });
+            if (extracted.ok) fileText = extracted.text || '';
+          }
+          if (!fileText) {
+            try {
+              const jina = await fetch(`https://r.jina.ai/${c.url}`, {
+                headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
+              });
+              if (jina.ok) fileText = (await jina.text()).substring(0, 8000);
+            } catch(e) {}
+          }
+
+          // Extract logistics (7 fixed fields)
+          const logistics = await GEMINI.extractLogistics(fileText, c.fob);
+
+          // Extract tech specs
+          const techSpecs = await GEMINI.extractTechSpecs(fileText, desc, refSpecs);
+
+          rawCots.push({
+            ...c,
+            fileText,
+            logistics,
+            techSpecs,
+            ok: true
+          });
         } catch(e) {
-          analyzed.push({ ...c, ok: false, error: e.message,
-            fob_num: parseFloat(String(c.fob).replace(/[^0-9.]/g,'')) || 0,
-            moq: 0, lead_time: 0, tech_score: 0, resumen: 'No se pudo analizar.' });
+          rawCots.push({ ...c, ok: false, error: e.message,
+            logistics: { fob_num: parseFloat(String(c.fob||'0').replace(/[^0-9.]/g,''))||0 },
+            techSpecs: {} });
         }
       }
 
-      // Step 3: Normalize and score
-      setStatus('Calculando scores…');
-      const scored = this._cotScore(analyzed, target, wPrecio, wSpecs, wMoq, wLead, totalW);
+      // ── FASE 3: Normalización de specs ─────────────────────────────────
+      setStatus('Normalizando especificaciones técnicas…');
+      const allTechSpecs = rawCots.filter(c => c.ok).map(c => c.techSpecs);
+      const { normalizedSpecs, specsTable } = await GEMINI.normalizeSpecs(allTechSpecs, rawCots.filter(c=>c.ok).length);
 
-      // Step 4: Render results
-      this._cotRenderResults(scored, refSpecs, row);
+      // Apply normalized specs back
+      rawCots.forEach((c, i) => {
+        if (c.ok) c.techNorm = normalizedSpecs[i] || {};
+      });
+
+      // ── FASE 4: Detección de categoría ─────────────────────────────────
+      setStatus('Detectando categoría del producto…');
+      const allCats   = CONFIG.getAllCats();
+      const catDetect = await GEMINI.detectCategory(desc, specsTable, allCats);
+      this.state.cotPendingCategory = catDetect;
+      this.state.cotPendingData     = { rawCots, refSpecs, specsTable, row, target, wPrecio, wSpecs, wMoq, wLead, totalW };
+
+      // ── FASE 5: Category widget (blocks until user responds) ───────────
+      this._cotShowCategoryWidget(catDetect, specsTable, allCats, async (confirmedCatId) => {
+        // Resume after user confirms category
+        setStatus('Generando benchmark completo…');
+        const benchmark = await GEMINI.benchmarkAnalysis(
+          rawCots.filter(c => c.ok), refSpecs, specsTable, desc, confirmedCatId
+        );
+        const scored = this._cotScoreV2(rawCots, target, wPrecio, wSpecs, wMoq, wLead, totalW);
+        this._cotRenderResultsV2(scored, refSpecs, specsTable, benchmark, row);
+      });
 
     } catch(e) {
       resultsEl.innerHTML = `<div class="gen-status error">⚠ ${e.message}</div>`;
+      console.error(e);
     }
   },
 
-  // ── Score all cotizaciones ────────────────────────────────────────────────
-  _cotScore(analyzed, target, wPrecio, wSpecs, wMoq, wLead, totalW) {
+  // ── Category detection widget ─────────────────────────────────────────────
+  _cotShowCategoryWidget(catDetect, specsTable, allCats, onConfirm) {
+    const resultsEl = document.getElementById('cot-results');
+    if (!resultsEl) return;
+
+    const existing    = catDetect.existing_cat_id ? allCats[catDetect.existing_cat_id] : null;
+    const isNew       = !existing;
+    const suggestedId = catDetect.existing_cat_id || catDetect.suggested_id || 'nueva';
+
+    // Build specs fields for new category (pre-filled from detected specs)
+    const detectedFields = (catDetect.suggested_campos || specsTable.slice(0,12)).map(f => {
+      if (typeof f === 'string') return { label: f, tipo: 'texto', unidad: '', req: false };
+      return { label: f.label||f, tipo: f.tipo||'texto', unidad: f.unidad||'', req: f.req||false };
+    });
+
+    const fieldsHTML = detectedFields.map((f,i) => `
+      <div class="campo-row" id="cat-w-field-${i}">
+        <input type="text" class="campo-label" value="${f.label}" placeholder="Nombre">
+        <input type="text" class="campo-unidad" value="${f.unidad||''}" placeholder="Pa, W, °C…">
+        <select class="campo-tipo">
+          <option value="texto"   ${f.tipo==='texto'   ?'selected':''}>Texto</option>
+          <option value="numero"  ${f.tipo==='numero'  ?'selected':''}>Número</option>
+          <option value="booleano"${f.tipo==='booleano'?'selected':''}>Sí/No</option>
+        </select>
+        <label class="campo-req-wrap">
+          <input type="checkbox" class="campo-req" ${f.req?'checked':''}>
+          <span>Req.</span>
+        </label>
+        <button class="btn-icon btn-del" onclick="this.closest('.campo-row').remove()">✕</button>
+      </div>`).join('');
+
+    resultsEl.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:24px">
+
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <span style="font-size:20px">🏷</span>
+          <div>
+            <div style="font-size:14px;font-weight:700;color:var(--text)">
+              ${isNew ? 'Categoría nueva detectada' : 'Categoría sugerida'}
+            </div>
+            <div style="font-size:11px;color:var(--text-muted)">
+              La IA identificó este producto como:
+              <strong style="color:var(--accent)">${catDetect.suggested_name || 'Categoría desconocida'}</strong>
+            </div>
+          </div>
+        </div>
+
+        ${catDetect.reasoning ? `
+        <div style="font-size:12px;color:var(--text-muted);background:var(--surface2);
+                    border-radius:6px;padding:8px 12px;margin-bottom:16px;line-height:1.5">
+          ${catDetect.reasoning}
+        </div>` : ''}
+
+        ${existing ? `
+        <!-- Existing category match -->
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;
+                    padding:12px 16px;margin-bottom:16px">
+          <div style="font-size:12px;font-weight:700;color:#059669;margin-bottom:4px">
+            ✔ Coincide con categoría existente
+          </div>
+          <div style="font-size:13px;font-weight:600">
+            ${existing.emoji||'📦'} ${existing.nombre}
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+            ${existing.campos?.length||0} campos definidos
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end">
+          <button class="btn-ghost" onclick="APP._cotCategorySkip()">Omitir y continuar</button>
+          <button class="btn-primary" onclick="APP._cotCategoryConfirm('${existing.id}')">
+            ✔ Usar "${existing.nombre}"
+          </button>
+        </div>
+        ` : `
+        <!-- New category -->
+        <div style="margin-bottom:14px">
+          <div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:12px">
+            <div class="form-group" style="margin:0">
+              <label style="font-size:11px;font-weight:700;color:var(--text-muted);
+                            text-transform:uppercase;letter-spacing:.04em">Nombre</label>
+              <input type="text" id="cat-w-nombre" value="${catDetect.suggested_name||''}"
+                     style="margin-top:4px">
+            </div>
+            <div class="form-group" style="margin:0">
+              <label style="font-size:11px;font-weight:700;color:var(--text-muted);
+                            text-transform:uppercase;letter-spacing:.04em">Emoji</label>
+              <input type="text" id="cat-w-emoji" value="${catDetect.suggested_emoji||'📦'}"
+                     maxlength="2" style="margin-top:4px;width:60px">
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                        letter-spacing:.04em;color:var(--text-muted)">
+              Specs detectadas (${detectedFields.length})
+            </div>
+            <button class="btn-ghost" style="font-size:11px;padding:4px 10px"
+              onclick="APP._cotAddCampoWidget()">+ Agregar campo</button>
+          </div>
+          <div class="campos-header">
+            <span>Nombre</span><span>Unidad</span><span>Tipo</span><span>Req.</span><span></span>
+          </div>
+          <div id="cat-w-campos" style="max-height:240px;overflow-y:auto">
+            ${fieldsHTML}
+          </div>
+        </div>
+
+        <div style="display:flex;gap:10px;justify-content:flex-end;padding-top:12px;
+                    border-top:1px solid var(--border)">
+          <button class="btn-ghost" onclick="APP._cotCategorySkip()">Omitir</button>
+          <button class="btn-primary" onclick="APP._cotCategorySaveNew()">
+            💾 Crear categoría y continuar
+          </button>
+        </div>
+        `}
+      </div>`;
+
+    // Store callback for after user responds
+    this.state._cotCategoryCallback = onConfirm;
+  },
+
+  _cotAddCampoWidget() {
+    const list = document.getElementById('cat-w-campos');
+    if (!list) return;
+    const row = document.createElement('div');
+    row.className = 'campo-row';
+    row.innerHTML =
+      '<input type="text" class="campo-label" placeholder="Nombre del campo">' +
+      '<input type="text" class="campo-unidad" placeholder="W, kg, cm…">' +
+      '<select class="campo-tipo">' +
+      '<option value="texto">Texto</option>' +
+      '<option value="numero">Número</option>' +
+      '<option value="booleano">Sí/No</option>' +
+      '</select>' +
+      '<label class="campo-req-wrap"><input type="checkbox" class="campo-req"><span>Req.</span></label>' +
+      '<button class="btn-icon btn-del" onclick="this.closest(\'.campo-row\').remove()">✕</button>';
+    list.appendChild(row);
+    row.querySelector('.campo-label').focus();
+  },
+
+  _cotCategorySkip() {
+    const cb = this.state._cotCategoryCallback;
+    if (cb) cb(null);
+  },
+
+  _cotCategoryConfirm(catId) {
+    const cb = this.state._cotCategoryCallback;
+    if (cb) cb(catId);
+  },
+
+  async _cotCategorySaveNew() {
+    const nombre = document.getElementById('cat-w-nombre')?.value.trim();
+    const emoji  = document.getElementById('cat-w-emoji')?.value.trim() || '📦';
+    if (!nombre) { this.showToast('El nombre es obligatorio.', 'error'); return; }
+
+    const campos = [];
+    document.querySelectorAll('#cat-w-campos .campo-row').forEach(row => {
+      const label = row.querySelector('.campo-label')?.value.trim();
+      if (!label) return;
+      const unidad = row.querySelector('.campo-unidad')?.value.trim() || '';
+      const tipo   = row.querySelector('.campo-tipo')?.value || 'texto';
+      const req    = row.querySelector('.campo-req')?.checked || false;
+      const id     = label.toLowerCase().replace(/[^a-z0-9]/g,'_').replace(/__+/g,'_') +
+                     (unidad && unidad !== 'SN' ? '_' + unidad.toLowerCase() : '');
+      campos.push({ id, label, unidad: unidad||undefined, tipo, req });
+    });
+
+    const id        = nombre.toLowerCase().replace(/[^a-z0-9]/g,'_').replace(/__+/g,'_');
+    const sheetName = 'Catalogo_' + nombre.replace(/\s+/g,'');
+    const cat       = { id, nombre, emoji, sheetName, niveles: ['Entry','Mid','High','Premium'], campos };
+
+    CONFIG.addCustomCat(cat);
+    DB.createCategorySheet(cat).catch(()=>{});
+    DB.pushCategories().catch(()=>{});
+
+    this.showToast(`Categoría "${nombre}" creada.`, 'success');
+    const cb = this.state._cotCategoryCallback;
+    if (cb) cb(id);
+  },
+
+  // ── Score V2 — uses normalized logistics data ─────────────────────────────
+  _cotScoreV2(rawCots, target, wPrecio, wSpecs, wMoq, wLead, totalW) {
     const normalize = (vals, invert = false) => {
       const nums = vals.map(Number).filter(v => !isNaN(v) && v > 0);
       if (!nums.length) return vals.map(() => 0.5);
@@ -2149,117 +2395,130 @@ const APP = {
       });
     };
 
-    const fobs   = analyzed.map(c => c.fob_num  || parseFloat(String(c.fob||'0').replace(/[^0-9.]/g,'')) || 0);
-    const moqs   = analyzed.map(c => c.moq   || 0);
-    const leads  = analyzed.map(c => c.lead_time || 0);
-    const techs  = analyzed.map(c => (c.tech_score || 0) / 100);
+    const fobs  = rawCots.map(c => c.logistics?.fob_num || parseFloat(String(c.fob||'').replace(/[^0-9.]/g,''))||0);
+    const moqs  = rawCots.map(c => c.logistics?.moq  || 0);
+    const leads = rawCots.map(c => c.logistics?.lead_time || 0);
+    const techs = rawCots.map(c => (c.logistics?.tech_score || 0) / 100);
 
-    // Price: if target given, score = how close to target (lower = better)
-    const nFob  = normalize(fobs,  true);   // lower FOB = better
-    const nMoq  = normalize(moqs,  true);   // lower MOQ = better
-    const nLead = normalize(leads, true);   // lower lead = better
-    const nTech = techs;                    // higher tech = better
+    const nFob  = normalize(fobs,  true);
+    const nMoq  = normalize(moqs,  true);
+    const nLead = normalize(leads, true);
+    const nTech = techs;
 
-    return analyzed.map((c, i) => {
-      const score = (
-        nFob[i]  * wPrecio +
-        nTech[i] * wSpecs  +
-        nMoq[i]  * wMoq    +
-        nLead[i] * wLead
-      ) / totalW * 100;
-
-      return {
-        ...c,
-        fob_num:    fobs[i],
-        score:      Math.round(score * 10) / 10,
-        n_fob:      Math.round(nFob[i]  * 100),
-        n_tech:     Math.round(nTech[i] * 100),
-        n_moq:      Math.round(nMoq[i]  * 100),
-        n_lead:     Math.round(nLead[i] * 100),
-      };
-    }).sort((a, b) => b.score - a.score);
+    return rawCots.map((c, i) => ({
+      ...c,
+      fob_num:   fobs[i],
+      score:     Math.round(((nFob[i]*wPrecio + nTech[i]*wSpecs + nMoq[i]*wMoq + nLead[i]*wLead) / totalW) * 1000) / 10,
+      n_fob:     Math.round(nFob[i]*100),
+      n_tech:    Math.round(nTech[i]*100),
+      n_moq:     Math.round(nMoq[i]*100),
+      n_lead:    Math.round(nLead[i]*100),
+    })).sort((a,b) => b.score - a.score);
   },
 
-  // ── Render final results ──────────────────────────────────────────────────
-  _cotRenderResults(scored, refSpecs, row) {
+  // ── Render V2 — full benchmark with logistics + specs table + narrative ────
+  _cotRenderResultsV2(scored, refSpecs, specsTable, benchmark, row) {
     const resultsEl = document.getElementById('cot-results');
     if (!resultsEl) return;
 
-    const winner  = scored[0];
-    const sku     = row['SKU'] || '–';
-    const target  = row['Target price'] || '';
+    const winner = scored[0];
+    const sku    = row['SKU'] || '–';
 
-    // ── Winner card ───────────────────────────────────────────────────────
-    const winnerHTML = `
-      <div class="cot-winner-card">
-        <div class="cot-winner-label">🏆 MEJOR COTIZACIÓN</div>
-        <div class="cot-winner-name">${winner.proveedor}</div>
+    const sc = s => s >= 70 ? '#059669' : s >= 45 ? '#d97706' : '#dc2626';
+    const nd = '<span style="color:var(--text-dim);font-size:11px">N/D</span>';
+
+    // ── Winner card ─────────────────────────────────────────────────────────
+    const winnerCard = `
+      <div class="cot-winner-card" style="margin-bottom:20px">
+        <div class="cot-winner-label">🏆 MEJOR COTIZACIÓN — SKU ${sku}</div>
+        <div class="cot-winner-name">${winner.proveedor}${winner.logistics?.modelo?' — '+winner.logistics.modelo:''}</div>
         <div class="cot-winner-meta">
-          ${winner.fob_num ? `<span>💰 FOB <strong>USD ${winner.fob_num}</strong></span>` : ''}
-          ${winner.moq     ? `<span>📦 MOQ <strong>${winner.moq} uds.</strong></span>` : ''}
-          ${winner.lead_time ? `<span>⚡ Lead <strong>${winner.lead_time} días</strong></span>` : ''}
-          ${winner.modelo  ? `<span>🏷 <strong>${winner.modelo}</strong></span>` : ''}
+          ${winner.fob_num?`<span>💰 FOB <strong>USD ${winner.fob_num}</strong></span>`:''}
+          ${winner.logistics?.puerto?`<span>🚢 <strong>${winner.logistics.puerto}</strong></span>`:''}
+          ${winner.logistics?.moq?`<span>📦 MOQ <strong>${winner.logistics.moq} uds.</strong></span>`:''}
+          ${winner.logistics?.lead_time?`<span>⚡ Lead <strong>${winner.logistics.lead_time} días</strong></span>`:''}
+          ${winner.logistics?.payment_terms?`<span>💳 <strong>${winner.logistics.payment_terms}</strong></span>`:''}
         </div>
-        <div class="cot-winner-score">Score: ${winner.score}%</div>
-        ${winner.resumen ? `<div class="cot-winner-summary">${winner.resumen}</div>` : ''}
-        ${winner.url ? `<a href="${winner.url}" target="_blank" class="btn-ghost" style="font-size:12px;margin-top:10px;display:inline-block">↗ Ver cotización completa</a>` : ''}
+        <div class="cot-winner-score">${winner.score}% score final</div>
+        ${benchmark?.resumen_ejecutivo?`<div class="cot-winner-summary">${benchmark.resumen_ejecutivo}</div>`:''}
       </div>`;
 
-    // ── Ref specs summary ─────────────────────────────────────────────────
-    const refHTML = refSpecs.specs ? `
-      <div class="cot-ref-specs">
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;
-                    letter-spacing:.04em;color:var(--text-muted);margin-bottom:8px">
-          🔗 Specs del producto de referencia
-        </div>
-        <div style="font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap">${refSpecs.specs}</div>
-      </div>` : '';
+    // ── Logistics comparison table ──────────────────────────────────────────
+    const logFields = [
+      { key: 'fob_display', label: '💰 FOB USD + Puerto' },
+      { key: 'ctn_size',    label: '📦 CTN Size L×W×H (cm)' },
+      { key: 'ctn_weight',  label: '⚖ CTN Weight (kg)' },
+      { key: 'pcs_ctn',     label: '🔢 PCS/CTN' },
+      { key: 'lead_time',   label: '⚡ Lead Time' },
+      { key: 'payment_terms',label: '💳 Payment Terms' },
+      { key: 'modelo',      label: '🏷 Model / SKU' },
+    ];
 
-    // ── Ranking table ─────────────────────────────────────────────────────
-    const rowsHTML = scored.map((c, i) => {
-      const isWinner = i === 0;
-      const scoreColor = c.score >= 70 ? '#059669' : c.score >= 45 ? '#d97706' : '#dc2626';
-      return `
-        <tr class="${isWinner ? 'cot-row-winner' : ''}">
-          <td style="text-align:center;font-weight:800;font-size:16px">${isWinner ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i+1)}</td>
-          <td>
-            <div style="font-weight:600">${c.proveedor}</div>
-            ${c.modelo ? `<div style="font-size:11px;color:var(--text-muted)">${c.modelo}</div>` : ''}
-          </td>
-          <td style="text-align:center;font-weight:700">
-            ${c.fob_num ? `USD ${c.fob_num}` : '<span class="nd">–</span>'}
-          </td>
-          <td style="text-align:center">${c.moq || '<span class="nd">–</span>'}</td>
-          <td style="text-align:center">${c.lead_time ? c.lead_time + ' días' : '<span class="nd">–</span>'}</td>
-          <td style="text-align:center">
-            <div class="cot-score-bar-wrap">
-              <div class="cot-score-bar" style="width:${c.tech_score||0}%;background:${scoreColor}"></div>
-              <span>${c.tech_score || 0}%</span>
-            </div>
-          </td>
-          <td style="text-align:center">
-            <div style="font-size:18px;font-weight:800;color:${scoreColor}">${c.score}%</div>
-            <div style="display:flex;gap:3px;justify-content:center;margin-top:3px">
-              <div class="cot-mini-bar" style="width:${c.n_fob}%;background:#6366f1" title="Precio"></div>
-              <div class="cot-mini-bar" style="width:${c.n_tech}%;background:#059669" title="Técnico"></div>
-              <div class="cot-mini-bar" style="width:${c.n_moq}%;background:#f59e0b" title="MOQ"></div>
-              <div class="cot-mini-bar" style="width:${c.n_lead}%;background:#0ea5e9" title="Lead"></div>
-            </div>
-          </td>
-          <td>
-            ${c.ok
-              ? (c.ventajas?.length ? `<div style="font-size:11px;color:#059669">✅ ${c.ventajas.slice(0,2).join(' · ')}</div>` : '')
-              + (c.gaps?.length    ? `<div style="font-size:11px;color:#dc2626;margin-top:2px">⚠ ${c.gaps.slice(0,1).join('')}</div>` : '')
-              : `<div style="font-size:11px;color:var(--danger)">⚠ ${c.error}</div>`}
-          </td>
-        </tr>`;
+    const logHeader = `<tr><th>Campo logístico</th>${scored.map(c=>`<th style="text-align:center">${c.proveedor}</th>`).join('')}</tr>`;
+    const logRows   = logFields.map(f => {
+      const cells = scored.map(c => {
+        const l = c.logistics || {};
+        let val = '';
+        if (f.key === 'fob_display') val = l.fob_num ? `USD ${l.fob_num}${l.puerto?' · '+l.puerto:''}` : '';
+        else if (f.key === 'lead_time') val = l.lead_time ? l.lead_time + ' días' : '';
+        else val = l[f.key] || '';
+        return `<td style="text-align:center;font-size:12px">${val || nd}</td>`;
+      }).join('');
+      return `<tr><td style="font-size:12px;font-weight:600;white-space:nowrap">${f.label}</td>${cells}</tr>`;
     }).join('');
 
-    resultsEl.innerHTML = winnerHTML + refHTML + `
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;
-                  letter-spacing:.04em;color:var(--text-muted);margin:20px 0 10px">
-        📊 Ranking completo
-      </div>
+    const logTable = `
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+                  color:var(--text-muted);margin:20px 0 10px">📋 Datos logísticos</div>
+      <div class="table-scroll">
+        <table class="data-table" style="font-size:12px">
+          <thead>${logHeader}</thead>
+          <tbody>${logRows}</tbody>
+        </table>
+      </div>`;
+
+    // ── Tech specs comparison table ─────────────────────────────────────────
+    let techTable = '';
+    if (specsTable && specsTable.length) {
+      const specHeader = `<tr><th>Especificación técnica</th>${scored.map(c=>`<th style="text-align:center">${c.proveedor}</th>`).join('')}</tr>`;
+      const specRows   = specsTable.map(spec => {
+        const cells = scored.map(c => {
+          const val = c.techNorm?.[spec] || c.techSpecs?.[spec] || '';
+          return `<td style="text-align:center;font-size:12px">${val || nd}</td>`;
+        }).join('');
+        return `<tr><td style="font-size:12px;font-weight:600">${spec}</td>${cells}</tr>`;
+      }).join('');
+
+      techTable = `
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+                    color:var(--text-muted);margin:20px 0 10px">🔬 Benchmark técnico</div>
+        <div class="table-scroll">
+          <table class="data-table" style="font-size:12px">
+            <thead>${specHeader}</thead>
+            <tbody>${specRows}</tbody>
+          </table>
+        </div>`;
+    }
+
+    // ── Score ranking ───────────────────────────────────────────────────────
+    const scoreRows = scored.map((c,i) => `
+      <tr class="${i===0?'cot-row-winner':''}">
+        <td style="text-align:center;font-size:16px;font-weight:800">
+          ${i===0?'🥇':i===1?'🥈':i===2?'🥉':'#'+(i+1)}
+        </td>
+        <td>
+          <div style="font-weight:600">${c.proveedor}</div>
+          ${c.logistics?.modelo?`<div style="font-size:11px;color:var(--text-muted)">${c.logistics.modelo}</div>`:''}
+        </td>
+        <td style="text-align:center;font-weight:700">${c.fob_num?'USD '+c.fob_num:nd}</td>
+        <td style="text-align:center">${c.logistics?.moq||nd}</td>
+        <td style="text-align:center">${c.logistics?.lead_time?c.logistics.lead_time+' días':nd}</td>
+        <td style="text-align:center;font-size:17px;font-weight:800;color:${sc(c.score)}">${c.score}%</td>
+      </tr>`).join('');
+
+    const scoreTable = `
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+                  color:var(--text-muted);margin:20px 0 10px">📊 Ranking final</div>
       <div class="table-scroll">
         <table class="data-table" style="font-size:12px">
           <thead>
@@ -2268,23 +2527,85 @@ const APP = {
               <th>Proveedor</th>
               <th style="text-align:center">FOB USD</th>
               <th style="text-align:center">MOQ</th>
-              <th style="text-align:center">Lead</th>
-              <th style="text-align:center">Tech match</th>
+              <th style="text-align:center">Lead time</th>
               <th style="text-align:center">Score final</th>
-              <th>Ventajas / Gaps</th>
             </tr>
           </thead>
-          <tbody>${rowsHTML}</tbody>
+          <tbody>${scoreRows}</tbody>
         </table>
-      </div>
-      <div style="margin-top:16px;display:flex;gap:10px">
-        <button class="btn-primary" onclick="APP.cotExport()">⬇ Exportar HTML</button>
-        <button class="btn-ghost" onclick="APP.cotCopyToComp()">➕ Crear comparativa completa</button>
       </div>`;
 
-    // Store for export
-    this.state.cotLastResult = { scored, refSpecs, row };
+    // ── Narrative benchmark ─────────────────────────────────────────────────
+    let narrative = '';
+    if (benchmark) {
+      const ventajasHTML = (benchmark.ventajas_por_proveedor||[]).map(v => `
+        <div style="margin-bottom:10px">
+          <div style="font-size:12px;font-weight:700;color:var(--text)">${v.proveedor}</div>
+          <div style="font-size:12px;color:#059669;margin-top:2px">${(v.ventajas||[]).map(x=>'✅ '+x).join(' · ')}</div>
+          ${v.gaps?.length?`<div style="font-size:12px;color:#dc2626;margin-top:2px">${v.gaps.map(x=>'⚠ '+x).join(' · ')}</div>`:''}
+        </div>`).join('');
+
+      const recsHTML = (benchmark.recomendaciones||[]).map(r => `
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-start">
+          <span style="font-size:14px;flex-shrink:0">💡</span>
+          <div style="font-size:12px;line-height:1.5"><strong>${r.titulo}:</strong> ${r.descripcion}</div>
+        </div>`).join('');
+
+      const modoB = (benchmark.ranking_entre_cotizaciones||[]).map((r,i) => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;
+                    border-bottom:1px solid var(--border);font-size:12px">
+          <span style="font-weight:800;font-size:14px">${i===0?'🥇':i===1?'🥈':i===2?'🥉':'#'+(i+1)}</span>
+          <div style="flex:1"><strong>${r.proveedor}</strong> — ${r.razon}</div>
+        </div>`).join('');
+
+      narrative = `
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;
+                    padding:20px;margin-top:20px">
+          <div style="font-size:13px;font-weight:700;margin-bottom:16px">📝 Análisis narrativo</div>
+
+          ${ventajasHTML ? `
+          <div style="margin-bottom:16px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+                        color:var(--text-muted);margin-bottom:10px">Ventajas y gaps por proveedor</div>
+            ${ventajasHTML}
+          </div>` : ''}
+
+          ${recsHTML ? `
+          <div style="margin-bottom:16px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+                        color:var(--text-muted);margin-bottom:10px">Recomendaciones</div>
+            ${recsHTML}
+          </div>` : ''}
+
+          ${modoB ? `
+          <div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+                        color:var(--text-muted);margin-bottom:10px">🔀 Ranking entre cotizaciones</div>
+            ${modoB}
+          </div>` : ''}
+        </div>`;
+    }
+
+    // ── Ref specs box ───────────────────────────────────────────────────────
+    const refBox = refSpecs?.specs_obj && Object.keys(refSpecs.specs_obj).length ? `
+      <div class="cot-ref-specs" style="margin-bottom:0">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+                    color:var(--text-muted);margin-bottom:8px">🔗 Producto de referencia</div>
+        <div style="font-size:12px;line-height:1.7">
+          ${Object.entries(refSpecs.specs_obj).map(([k,v])=>`<span style="margin-right:16px"><strong>${k}:</strong> ${v}</span>`).join('')}
+        </div>
+      </div>` : '';
+
+    resultsEl.innerHTML =
+      winnerCard + refBox + logTable + techTable + scoreTable + narrative +
+      `<div style="margin-top:20px;display:flex;gap:10px">
+        <button class="btn-primary" onclick="APP.cotExport()">⬇ Exportar HTML</button>
+        <button class="btn-ghost"   onclick="APP.cotCopyToComp()">➕ Crear comparativa</button>
+      </div>`;
+
+    this.state.cotLastResult = { scored, refSpecs, specsTable, benchmark, row };
   },
+
 
   // ── Export results as standalone HTML ────────────────────────────────────
   cotExport() {
