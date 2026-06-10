@@ -1,4 +1,548 @@
 // ─── GADNIC COMPARADOR · APP ───────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUPPLY CHAIN PARSER ENGINE — extracción sin IA
+// Cubre: CSV multi-producto, CSV single-product, texto libre estructurado
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const SCPARSER = {
+
+  // ── Master entry point ────────────────────────────────────────────────────
+  // Receives raw text + optional hints, returns structured logistics object
+  parseLogistics(rawText, { skuHint = '', refUrlHint = '', fobHint = '' } = {}) {
+    if (!rawText || !rawText.trim()) return this._empty();
+
+    const text = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    // Detect format and route accordingly
+    const lines     = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const isCSV     = this._detectCSV(lines);
+    const hasHeaders = this._detectExplicitHeaders(lines);
+
+    let result;
+    if (isCSV && hasHeaders) {
+      result = this._parseCSVWithHeaders(lines, skuHint, refUrlHint);
+    } else if (isCSV) {
+      result = this._parseCSVFreeform(lines, skuHint, refUrlHint);
+    } else {
+      result = this._parseTextFreeform(text);
+    }
+
+    // Fill blanks with hint from Sheet column
+    if (!result.fob_num && fobHint) {
+      const m = String(fobHint).match(/[\d]+\.?[\d]*/);
+      if (m) result.fob_num = parseFloat(m[0]);
+    }
+
+    return result;
+  },
+
+  // ── Detect if text is CSV-like (has many comma/tab separators) ────────────
+  _detectCSV(lines) {
+    const sample = lines.slice(0, 10);
+    const commas = sample.filter(l => (l.match(/,/g)||[]).length >= 3).length;
+    const tabs   = sample.filter(l => (l.match(/\t/g)||[]).length >= 2).length;
+    return commas >= 3 || tabs >= 3;
+  },
+
+  // ── Detect if CSV has explicit column headers we can use ──────────────────
+  _detectExplicitHeaders(lines) {
+    const headerKeywords = ['fob','price','sku','model','spec','ctn','moq','lead',
+                            'delivery','payment','packing','port','peso','precio'];
+    return lines.slice(0, 15).some(l =>
+      headerKeywords.filter(k => l.toLowerCase().includes(k)).length >= 2
+    );
+  },
+
+  // ── Parse CSV with explicit column headers ────────────────────────────────
+  _parseCSVWithHeaders(lines, skuHint, refUrlHint) {
+    // Find the header row
+    const headerKeywords = ['fob','price','sku','model','spec','ctn','moq',
+                            'lead','delivery','payment','packing','port'];
+    let headerIdx = -1;
+    let maxScore  = 0;
+
+    lines.forEach((line, i) => {
+      const lower = line.toLowerCase();
+      const score = headerKeywords.filter(k => lower.includes(k)).length;
+      if (score > maxScore) { maxScore = score; headerIdx = i; }
+    });
+
+    if (headerIdx < 0) return this._parseTextFreeform(lines.join('\n'));
+
+    // Parse headers — detect separator
+    const headerLine = lines[headerIdx];
+    const sep        = (headerLine.match(/\t/g)||[]).length > (headerLine.match(/,/g)||[]).length ? '\t' : ',';
+    const headers    = this._splitCSVLine(headerLine, sep).map(h => h.toLowerCase().trim());
+
+    // Map header indices to field names
+    const colMap = this._mapHeaders(headers);
+
+    // Find best matching data row
+    const dataLines = lines.slice(headerIdx + 1).filter(l => l.trim() && !l.match(/^,+$/));
+    const targetRow = this._findBestRow(dataLines, sep, headers, skuHint, refUrlHint, colMap);
+
+    if (!targetRow) return this._parseTextFreeform(lines.join('\n'));
+
+    const cells = this._splitCSVLine(targetRow, sep);
+    const get   = (col) => colMap[col] !== undefined ? (cells[colMap[col]] || '').replace(/^"|"$/g,'').trim() : '';
+
+    // Extract from company header lines too (lead time, port, payment often there)
+    const companyText = lines.slice(0, headerIdx).join('\n');
+
+    return {
+      fob_num:       this._parseNum(get('fob') || get('price') || get('unit_price')),
+      puerto:        this._cleanPort(get('port') || this._extractPort(companyText)),
+      ctn_size:      this._cleanSize(get('ctn_size') || get('packing')),
+      ctn_weight:    this._parseNum(get('ctn_weight') || get('gw') || get('gross_weight')),
+      pcs_ctn:       this._parseInt(get('pcs_ctn') || get('qty_ctn') || get('pieces_ctn') || get('moq_ctn')),
+      lead_time:     this._parseLead(get('lead_time') || get('delivery') || this._extractLead(companyText)),
+      payment_terms: get('payment') || this._extractPayment(companyText),
+      modelo:        get('model') || get('sku') || get('item_no'),
+      moq:           this._parseInt(get('moq') || get('quantity') || get('qty')),
+      specs_raw:     get('specs') || get('specification') || get('description'),
+    };
+  },
+
+  // ── Map CSV header strings to standardized field keys ─────────────────────
+  _mapHeaders(headers) {
+    const map = {};
+    const rules = [
+      { key: 'fob',           patterns: ['fob','unit price','exw','price (usd)','price(usd)','unit_price'] },
+      { key: 'port',          patterns: ['port','puerto','fob port'] },
+      { key: 'moq',           patterns: ['moq','quantity','qty','cantidad','minimum'] },
+      { key: 'ctn_size',      patterns: ['ctn size','ctn sizes','carton size','packing size','box size','packing info'] },
+      { key: 'ctn_weight',    patterns: ['ctn weight','gw','gross weight','ctn g.w','g.w','peso caja'] },
+      { key: 'pcs_ctn',       patterns: ['pcs/ctn','pieces per ctn','qty/ctn','pcs per carton','pieces per carton','pcs ctn'] },
+      { key: 'lead_time',     patterns: ['lead time','leadtime','delivery time','production time','tiempo entrega'] },
+      { key: 'payment',       patterns: ['payment','payment terms','terms','condiciones pago'] },
+      { key: 'model',         patterns: ['model','model number','sku','item no','item number','part no','modelo','ref'] },
+      { key: 'specs',         patterns: ['specs','specification','specifications','description','your specifications','descripcion'] },
+    ];
+
+    headers.forEach((h, i) => {
+      const hl = h.toLowerCase().replace(/[^a-z0-9\s]/g,' ').trim();
+      for (const rule of rules) {
+        if (!map[rule.key] && rule.patterns.some(p => hl.includes(p) || p.includes(hl))) {
+          map[rule.key] = i;
+          break;
+        }
+      }
+    });
+
+    return map;
+  },
+
+  // ── Find the data row that best matches the SKU/refUrl hints ──────────────
+  _findBestRow(dataLines, sep, headers, skuHint, refUrlHint, colMap) {
+    if (!dataLines.length) return null;
+    if (dataLines.length === 1) return dataLines[0];
+
+    // Score each row
+    const hints = [skuHint, refUrlHint].filter(Boolean).map(h => h.toLowerCase());
+
+    let bestScore = -1;
+    let bestRow   = dataLines[0]; // default: first data row
+
+    dataLines.forEach(line => {
+      if (!line.trim() || line.match(/^[,\t\s]+$/)) return;
+      const lower = line.toLowerCase();
+      // Skip rows with mostly "not available" or empty
+      const cells = this._splitCSVLine(line, sep);
+      const meaningful = cells.filter(c => c.trim() && !['not available','n/a','-',''].includes(c.trim().toLowerCase())).length;
+      if (meaningful < 2) return;
+
+      let score = meaningful; // base score = data density
+      hints.forEach(hint => {
+        // Extract meaningful words from hint URL/SKU
+        const words = hint.replace(/[^a-z0-9]/g,' ').split(/\s+/).filter(w => w.length > 3);
+        score += words.filter(w => lower.includes(w)).length * 3;
+      });
+
+      // Also check link column if exists
+      const linkCol = headers.findIndex(h => h.includes('link') || h.includes('url') || h.includes('publicacion'));
+      if (linkCol >= 0 && cells[linkCol]) {
+        const cellLink = cells[linkCol].toLowerCase();
+        hints.forEach(hint => {
+          if (cellLink.includes(hint.split('/').pop()?.substring(0,20) || '')) score += 10;
+        });
+      }
+
+      if (score > bestScore) { bestScore = score; bestRow = line; }
+    });
+
+    return bestRow;
+  },
+
+  // ── Parse CSV without clear headers (freeform) ───────────────────────────
+  _parseCSVFreeform(lines, skuHint, refUrlHint) {
+    // Try to extract by scanning all cells for recognizable patterns
+    const allText = lines.join('\n');
+    return this._parseTextFreeform(allText);
+  },
+
+  // ── Parse unstructured text using regex patterns ──────────────────────────
+  _parseTextFreeform(text) {
+    return {
+      fob_num:       this._extractFOB(text),
+      puerto:        this._extractPort(text),
+      ctn_size:      this._extractCTNSize(text),
+      ctn_weight:    this._extractCTNWeight(text),
+      pcs_ctn:       this._extractPCSCTN(text),
+      lead_time:     this._extractLead(text),
+      payment_terms: this._extractPayment(text),
+      modelo:        this._extractModel(text),
+      moq:           this._extractMOQ(text),
+      specs_raw:     '',
+    };
+  },
+
+  // ── Regex extractors ──────────────────────────────────────────────────────
+
+  _extractFOB(text) {
+    const patterns = [
+      /(?:fob|exw|unit\s*price|price)[:\s]*(?:usd\s*)?\$?\s*([\d]+\.?[\d]*)/i,
+      /\$\s*([\d]+\.[\d]{1,2})\s*(?:usd|per\s*pc|\/pc|per\s*unit)?/i,
+      /(?:^|[\s,])([\d]+\.[\d]{2})\s*(?:usd|,\s*ningbo|,\s*shanghai|,\s*guangzhou|,\s*shenzhen)/im,
+    ];
+    for (const p of patterns) {
+      const m = text.match(p);
+      if (m) {
+        const val = parseFloat(m[1]);
+        if (val > 0.5 && val < 50000) return val; // sanity check
+      }
+    }
+    return null;
+  },
+
+  _extractPort(text) {
+    const m = text.match(/(?:port|puerto|fob\s+port|from)[:\s]+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)/i)
+           || text.match(/\b(NINGBO|SHANGHAI|GUANGZHOU|SHENZHEN|XIAMEN|QINGDAO|TIANJIN|BEIJING|DONGGUAN|FOSHAN)\b/i);
+    return m ? m[1].toUpperCase().trim() : '';
+  },
+
+  _extractCTNSize(text) {
+    // Matches: 60*49*49, 60x49x49, 60×49×49, 54 * 46 * 24 cm
+    const m = text.match(/(\d+\.?\d*)\s*[*×xX]\s*(\d+\.?\d*)\s*[*×xX]\s*(\d+\.?\d*)\s*(?:cm)?/i);
+    if (m) return `${m[1]}x${m[2]}x${m[3]}`;
+    // Also try "L*W*H: 60*49*49"
+    const m2 = text.match(/(?:ctn\s*size|carton\s*size|box\s*size|packing)[:\s]+(\d+[*×xX]\d+[*×xX]\d+)/i);
+    if (m2) return m2[1].replace(/[×xX\*]/g,'x');
+    return '';
+  },
+
+  _extractCTNWeight(text) {
+    const m = text.match(/(?:ctn\s*(?:g\.?w\.?|weight|gross)|gross\s*weight|g\.w\.?|peso\s*(?:bruto|caja))[:\s]*([\d]+\.?[\d]*)\s*kg/i)
+           || text.match(/([\d]+\.?[\d]*)\s*kg\s*(?:per\s*carton|\/\s*carton|per\s*ctn|\/ctn)/i);
+    return m ? parseFloat(m[1]) : null;
+  },
+
+  _extractPCSCTN(text) {
+    const m = text.match(/(?:pcs?\s*\/?\s*ctn|pieces?\s*per\s*c(?:arton|tn)|qty\s*\/\s*ctn|units?\s*per\s*(?:carton|box)|per\s*carton)[:\s]*(\d+)/i)
+           || text.match(/(\d+)\s*(?:pcs?|pieces?|units?)\s*(?:per|\/)\s*(?:carton|ctn|box)/i)
+           || text.match(/(\d+)\s+per\s+carton/i);
+    return m ? parseInt(m[1]) : null;
+  },
+
+  _extractLead(text) {
+    // "30 days", "5-7 working days", "4 weeks", "around 30 days"
+    const m = text.match(/(?:lead\s*time|delivery\s*time|production\s*time|leadtimes?)[:\s]*(?:around\s*)?(\d+)(?:\s*-\s*(\d+))?\s*(days?|working\s*days?|weeks?)/i);
+    if (m) {
+      const n    = m[2] ? parseInt(m[2]) : parseInt(m[1]); // take max of range
+      const unit = m[3].toLowerCase();
+      return unit.includes('week') ? n * 7 : n;
+    }
+    return null;
+  },
+
+  _extractPayment(text) {
+    const m = text.match(/(?:payment\s*terms?|terms\s*of\s*payment|condiciones\s*de\s*pago)[:\s]*([^\n\r,]{10,80})/i);
+    return m ? m[1].trim() : '';
+  },
+
+  _extractModel(text) {
+    const m = text.match(/(?:model(?:\s*number)?|item\s*no\.?|sku|part\s*no\.?|ref\.?)[:\s]+([A-Z0-9][-A-Z0-9\s_]{2,20})/i);
+    return m ? m[1].trim() : '';
+  },
+
+  _extractMOQ(text) {
+    const m = text.match(/(?:moq|minimum\s*order(?:\s*quantity)?|min\s*order)[:\s]*(\d+)/i)
+           || text.match(/(\d+)\s*(?:pcs?|units?|pieces?)\s*(?:minimum|min\.?)/i);
+    return m ? parseInt(m[1]) : null;
+  },
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  _splitCSVLine(line, sep = ',') {
+    // Handle quoted fields properly
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        inQuotes = !inQuotes;
+      } else if (ch === sep && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  },
+
+  _parseNum(val) {
+    if (!val) return null;
+    const m = String(val).match(/[\d]+\.?[\d]*/);
+    return m ? parseFloat(m[0]) : null;
+  },
+
+  _parseInt(val) {
+    if (!val) return null;
+    const m = String(val).match(/\d+/);
+    return m ? parseInt(m[0]) : null;
+  },
+
+  _cleanPort(val) {
+    if (!val) return '';
+    return val.replace(/[^A-Za-z\s]/g,'').trim().toUpperCase().substring(0, 20);
+  },
+
+  _cleanSize(val) {
+    if (!val) return '';
+    // Normalize separators to x
+    return val.replace(/[×\*]/g,'x').replace(/\s+/g,'').replace(/cm/gi,'').trim();
+  },
+
+  _parseLead(val) {
+    if (!val) return null;
+    const m = String(val).match(/(\d+)(?:\s*-\s*(\d+))?\s*(day|week)/i);
+    if (m) {
+      const n = m[2] ? parseInt(m[2]) : parseInt(m[1]);
+      return m[3].toLowerCase().startsWith('w') ? n * 7 : n;
+    }
+    const n = String(val).match(/\d+/);
+    return n ? parseInt(n[0]) : null;
+  },
+
+  _empty() {
+    return {
+      fob_num: null, puerto: '', ctn_size: '', ctn_weight: null,
+      pcs_ctn: null, lead_time: null, payment_terms: '', modelo: '',
+      moq: null, specs_raw: ''
+    };
+  },
+
+  // ── Extract tech specs from structured text (no AI needed for known fields) ─
+  // Returns key-value pairs found in the text
+  parseTechSpecs(rawText, { knownFields = [] } = {}) {
+    if (!rawText || !rawText.trim()) return {};
+    const specs = {};
+    const text  = rawText.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+
+    // Pattern 1: "Key: Value" or "Key - Value"
+    const kvPattern = /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\/\-]{2,40}?)[:\-]\s*(.{1,100})$/gm;
+    let m;
+    while ((m = kvPattern.exec(text)) !== null) {
+      const key = m[1].trim();
+      const val = m[2].trim().replace(/[,;]+$/, '');
+      // Skip logistics fields
+      const skipKeys = ['fob','price','port','ctn','carton','moq','lead','payment','address','phone','mail','company'];
+      if (!skipKeys.some(s => key.toLowerCase().includes(s)) && val && val.length < 80) {
+        specs[key] = val;
+      }
+    }
+
+    // Pattern 2: Numbered list "1. Key: Value" or "1) Key: Value"
+    const numberedPattern = /^\d+[.)]\s*([A-Za-zÀ-ÿ][^:\n]{2,40}?):\s*(.{1,80})$/gm;
+    while ((m = numberedPattern.exec(text)) !== null) {
+      const key = m[1].trim();
+      const val = m[2].trim();
+      if (key && val && !specs[key]) specs[key] = val;
+    }
+
+    return specs;
+  },
+  // ── Detect category by keyword matching (no AI) ──────────────────────────
+  detectCategory(productDesc, specsTable, existingCats) {
+    const descLower  = productDesc.toLowerCase();
+    const specsStr   = (Array.isArray(specsTable) ? specsTable : Object.keys(specsTable||{})).join(' ').toLowerCase();
+    const combined   = descLower + ' ' + specsStr;
+
+    // Score each existing category
+    let bestId    = null;
+    let bestScore = 0;
+
+    Object.values(existingCats).forEach(cat => {
+      const catWords = (cat.nombre + ' ' + cat.id).toLowerCase().split(/[\s_]+/);
+      const score    = catWords.filter(w => w.length > 3 && combined.includes(w)).length;
+      if (score > bestScore) { bestScore = score; bestId = cat.id; }
+    });
+
+    // If strong match, return existing
+    if (bestScore >= 2 && bestId) {
+      return {
+        existing_cat_id: bestId,
+        suggested_name:  existingCats[bestId]?.nombre || '',
+        suggested_id:    bestId,
+        suggested_emoji: existingCats[bestId]?.emoji || '📦',
+        suggested_campos: existingCats[bestId]?.campos || [],
+        reasoning: `Coincide con categoría existente "${existingCats[bestId]?.nombre}" (${bestScore} palabras clave)`
+      };
+    }
+
+    // New category — suggest from specs
+    const campos = (Array.isArray(specsTable) ? specsTable : Object.keys(specsTable||{}))
+      .slice(0, 12)
+      .map(label => ({
+        label,
+        tipo:   this._inferFieldType(label),
+        unidad: this._inferUnit(label),
+        req:    false
+      }));
+
+    // Infer name from description
+    const words    = productDesc.split(/\s+/).slice(0, 4).join(' ');
+    const catId    = productDesc.toLowerCase().replace(/[^a-z0-9]/g,'_').replace(/__+/g,'_').substring(0,30);
+
+    return {
+      existing_cat_id: null,
+      suggested_name:  words,
+      suggested_id:    catId,
+      suggested_emoji: this._inferEmoji(combined),
+      suggested_campos: campos,
+      reasoning: `Categoría nueva detectada para: ${productDesc}`
+    };
+  },
+
+  // ── Infer field type from label ────────────────────────────────────────────
+  _inferFieldType(label) {
+    const l = label.toLowerCase();
+    const numWords  = ['velocidad','speed','rpm','potencia','power','watt','voltaje','voltage','batería','battery','mah','peso','weight','capacidad','capacity','autonomía','autonomy','temperatura','temperature','tiempo','time'];
+    const boolWords = ['incluye','include','tiene','has','wifi','bluetooth','inalámbrico','wireless','usb','hepa','led','digital'];
+    if (numWords.some(w => l.includes(w))) return 'numero';
+    if (boolWords.some(w => l.includes(w))) return 'booleano';
+    return 'texto';
+  },
+
+  // ── Infer unit from label ─────────────────────────────────────────────────
+  _inferUnit(label) {
+    const l = label.toLowerCase();
+    if (l.includes('rpm'))  return 'RPM';
+    if (l.includes('watt') || l.includes('potencia') || l.includes('power')) return 'W';
+    if (l.includes('volt')) return 'V';
+    if (l.includes('mah') || l.includes('batería') || l.includes('battery')) return 'mAh';
+    if (l.includes('kg') || l.includes('peso') || l.includes('weight')) return 'kg';
+    if (l.includes('cm') || l.includes('dimension') || l.includes('tamaño')) return 'cm';
+    if (l.includes('mm')) return 'mm';
+    if (l.includes('°c') || l.includes('temperatura') || l.includes('temp')) return '°C';
+    if (l.includes('hora') || l.includes('hour') || l.includes('autonomía')) return 'h';
+    if (l.includes('min') || l.includes('minuto')) return 'min';
+    return '';
+  },
+
+  // ── Infer emoji from combined text ────────────────────────────────────────
+  _inferEmoji(text) {
+    const t = text.toLowerCase();
+    if (t.includes('robot') || t.includes('aspira')) return '🤖';
+    if (t.includes('freidora') || t.includes('air fry')) return '🍳';
+    if (t.includes('tacho') || t.includes('vacuum')) return '🪣';
+    if (t.includes('nail') || t.includes('uña') || t.includes('mani')) return '💅';
+    if (t.includes('vaso') || t.includes('termo') || t.includes('bottle')) return '🥤';
+    if (t.includes('silla') || t.includes('chair')) return '🪑';
+    if (t.includes('jardin') || t.includes('garden') || t.includes('solar')) return '🌿';
+    if (t.includes('surf') || t.includes('agua') || t.includes('pool')) return '🏄';
+    if (t.includes('carro') || t.includes('car') || t.includes('auto')) return '🚗';
+    return '📦';
+  },
+
+  // ── Build benchmark narrative deterministically ───────────────────────────
+  buildBenchmarkNarrative(rawCots, refSpecs, specsTable, productDesc) {
+    if (!rawCots.length) return null;
+
+    const sorted = [...rawCots].sort((a, b) =>
+      (a.logistics?.fob_num || 999) - (b.logistics?.fob_num || 999)
+    );
+
+    const winner = sorted[0];
+
+    // Build ventajas/gaps per proveedor
+    const ventajas_por_proveedor = rawCots.map(c => {
+      const l        = c.logistics || {};
+      const fob      = l.fob_num;
+      const allFobs  = rawCots.map(x => x.logistics?.fob_num).filter(Boolean);
+      const minFob   = Math.min(...allFobs);
+      const maxFob   = Math.max(...allFobs);
+      const ventajas = [];
+      const gaps     = [];
+
+      if (fob && fob === minFob)  ventajas.push('Precio más competitivo');
+      if (fob && fob === maxFob && rawCots.length > 1) gaps.push('Precio más alto del grupo');
+      if (l.lead_time) {
+        const allLeads = rawCots.map(x => x.logistics?.lead_time).filter(Boolean);
+        if (l.lead_time === Math.min(...allLeads)) ventajas.push('Lead time más corto');
+        if (l.lead_time === Math.max(...allLeads) && allLeads.length > 1) gaps.push('Lead time más largo');
+      }
+      if (l.pcs_ctn) {
+        const allPcs = rawCots.map(x => x.logistics?.pcs_ctn).filter(Boolean);
+        if (l.pcs_ctn === Math.max(...allPcs)) ventajas.push('Mayor cantidad por caja');
+      }
+      const specCount = Object.values(c.techSpecs||{}).filter(v => v && v !== 'null').length;
+      if (specCount > 3) ventajas.push(`Cotización detallada (${specCount} specs)`);
+      if (specCount === 0) gaps.push('Sin especificaciones técnicas');
+
+      return { proveedor: c.proveedor, ventajas, gaps };
+    });
+
+    // Recommendations
+    const recomendaciones = [];
+    const fobs = rawCots.map(c => ({ p: c.proveedor, f: c.logistics?.fob_num })).filter(x => x.f);
+    if (fobs.length > 1) {
+      fobs.sort((a,b) => a.f - b.f);
+      const diff = ((fobs[fobs.length-1].f - fobs[0].f) / fobs[fobs.length-1].f * 100).toFixed(1);
+      recomendaciones.push({
+        titulo: 'Negociación de precio',
+        descripcion: `${fobs[fobs.length-1].p} tiene un precio ${diff}% más alto que ${fobs[0].p}. Podría negociarse una reducción.`
+      });
+    }
+
+    const leads = rawCots.map(c => ({ p: c.proveedor, l: c.logistics?.lead_time })).filter(x => x.l);
+    if (leads.length > 1) {
+      leads.sort((a,b) => a.l - b.l);
+      recomendaciones.push({
+        titulo: 'Lead time',
+        descripcion: `${leads[0].p} ofrece el menor tiempo de producción (${leads[0].l} días). Considerar para pedidos urgentes.`
+      });
+    }
+
+    // Ranking between cotizaciones
+    const ranking_entre_cotizaciones = sorted.map((c, i) => ({
+      posicion: i + 1,
+      proveedor: c.proveedor,
+      razon: c.logistics?.fob_num
+        ? `FOB USD ${c.logistics.fob_num}${c.logistics.puerto ? ' · ' + c.logistics.puerto : ''}`
+        : 'Sin precio registrado'
+    }));
+
+    const resumen = `Se analizaron ${rawCots.length} cotización${rawCots.length>1?'es':''} para ${productDesc}. ` +
+      (winner.logistics?.fob_num
+        ? `El precio más competitivo es USD ${winner.logistics.fob_num} de ${winner.proveedor}.`
+        : `Ver detalle por proveedor abajo.`);
+
+    return {
+      resumen_ejecutivo: resumen,
+      ventajas_por_proveedor,
+      gaps_criticos: [],
+      recomendaciones,
+      ranking_entre_cotizaciones,
+      oportunidades_negociacion: recomendaciones.map(r => r.titulo)
+    };
+  },
+
+};
+
 const APP = {
   state: {
     section:   'catalogo',
@@ -2165,12 +2709,20 @@ const APP = {
     };
 
     try {
-      // ── FASE 1: Referencia externa ─────────────────────────────────────
-      setStatus('Analizando producto de referencia…');
-      const refSpecs = linkRef
-        ? await GEMINI.extractRefSpecs(linkRef)
-        : { nombre: desc, specs: '', specs_obj: {} };
-
+      // ── FASE 1: Referencia externa (via Jina, sin IA) ───────────────────
+      setStatus('Cargando producto de referencia…');
+      let refSpecs = { nombre: desc, specs: '', specs_obj: {} };
+      if (linkRef) {
+        try {
+          const jinaRes = await fetch('https://r.jina.ai/' + linkRef, {
+            headers: { 'Accept': 'application/json', 'X-Return-Format': 'markdown' }
+          });
+          if (jinaRes.ok) {
+            const refText = (await jinaRes.text()).substring(0, 5000);
+            refSpecs = { nombre: desc, specs: refText, specs_obj: SCPARSER.parseTechSpecs(refText) };
+          }
+        } catch(e) { /* continue without ref */ }
+      }
       // ── FASE 2: Extracción por cotización (logística + técnica) ────────
       const rawCots = [];
       for (const c of cots) {
@@ -2210,11 +2762,18 @@ const APP = {
             } catch(e) {}
           }
 
-          // Extract logistics (7 fixed fields)
-          const logistics = await GEMINI.extractLogistics(fileText, c.fob, desc);
+          // Extract logistics using regex parser (no AI, no rate limits)
+          const logistics = SCPARSER.parseLogistics(fileText, {
+            skuHint:    row['SKU']                || '',
+            refUrlHint: row['Link de Referencia'] || '',
+            fobHint:    c.fob                     || ''
+          });
 
-          // Extract tech specs
-          const techSpecs = await GEMINI.extractTechSpecs(fileText, desc, refSpecs);
+          // Extract tech specs using structural parser (no AI)
+          const techSpecs = SCPARSER.parseTechSpecs(
+            fileText + '\n' + (logistics.specs_raw || ''),
+            { knownFields: [] }
+          );
 
           rawCots.push({
             ...c,
@@ -2230,29 +2789,41 @@ const APP = {
         }
       }
 
-      // ── FASE 3: Normalización de specs ─────────────────────────────────
-      setStatus('Normalizando especificaciones técnicas…');
-      const allTechSpecs = rawCots.filter(c => c.ok).map(c => c.techSpecs);
-      const { normalizedSpecs, specsTable } = await GEMINI.normalizeSpecs(allTechSpecs, rawCots.filter(c=>c.ok).length);
 
-      // Apply normalized specs back
-      rawCots.forEach((c, i) => {
-        if (c.ok) c.techNorm = normalizedSpecs[i] || {};
+      // ── FASE 3: Normalización determinística (sin IA) ────────────────────
+      setStatus('Cruzando especificaciones técnicas…');
+      const okCots      = rawCots.filter(c => c.ok);
+      const allTechSpecs = okCots.map(c => c.techSpecs || {});
+
+      // Count how many cotizaciones mention each spec key
+      const keyCounts = {};
+      allTechSpecs.forEach(specs => {
+        Object.keys(specs).forEach(k => { keyCounts[k] = (keyCounts[k] || 0) + 1; });
       });
 
-      // ── FASE 4: Detección de categoría ─────────────────────────────────
+      // Only keep specs present in >= minPresence cotizaciones (filter noise)
+      const minPresence = Math.max(1, Math.min(2, okCots.length - 1));
+      const specsTable  = Object.entries(keyCounts)
+        .filter(([k, count]) => count >= minPresence)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k]) => k)
+        .slice(0, 15);
+
+      // No synonym merging without AI — use raw keys
+      rawCots.forEach(c => { if (c.ok) c.techNorm = c.techSpecs || {}; });
+
       setStatus('Detectando categoría del producto…');
       const allCats   = CONFIG.getAllCats();
-      const catDetect = await GEMINI.detectCategory(desc, specsTable, allCats);
+      const catDetect = SCPARSER.detectCategory(desc, specsTable, allCats);
       this.state.cotPendingCategory = catDetect;
       this.state.cotPendingData     = { rawCots, refSpecs, specsTable, row, target, wPrecio, wSpecs, wMoq, wLead, totalW };
 
       // ── FASE 5: Category widget (blocks until user responds) ───────────
       this._cotShowCategoryWidget(catDetect, specsTable, allCats, async (confirmedCatId) => {
         // Resume after user confirms category
-        setStatus('Generando benchmark completo…');
-        const benchmark = await GEMINI.benchmarkAnalysis(
-          rawCots.filter(c => c.ok), refSpecs, specsTable, desc, confirmedCatId
+        setStatus('Calculando benchmark…');
+        const benchmark = SCPARSER.buildBenchmarkNarrative(
+          rawCots.filter(c => c.ok), refSpecs, specsTable, desc
         );
         const scored = this._cotScoreV2(rawCots, target, wPrecio, wSpecs, wMoq, wLead, totalW);
         this._cotRenderResultsV2(scored, refSpecs, specsTable, benchmark, row);
