@@ -2150,7 +2150,7 @@ const APP = {
           }
 
           // Extract logistics (7 fixed fields)
-          const logistics = await GEMINI.extractLogistics(fileText, c.fob);
+          const logistics = await GEMINI.extractLogistics(fileText, c.fob, desc);
 
           // Extract tech specs
           const techSpecs = await GEMINI.extractTechSpecs(fileText, desc, refSpecs);
@@ -2383,14 +2383,17 @@ const APP = {
     if (cb) cb(id);
   },
 
-  // ── Score V2 — uses normalized logistics data ─────────────────────────────
+  // ── Score V2 — penaliza N/D, no premia la ausencia de datos ─────────────
   _cotScoreV2(rawCots, target, wPrecio, wSpecs, wMoq, wLead, totalW) {
+    // Normalize: missing values (0/null) get 0 score, not 0.5
     const normalize = (vals, invert = false) => {
-      const nums = vals.map(Number).filter(v => !isNaN(v) && v > 0);
-      if (!nums.length) return vals.map(() => 0.5);
-      const mn = Math.min(...nums), mx = Math.max(...nums);
+      const withData = vals.filter(v => v > 0);
+      if (!withData.length) return vals.map(() => 0);
+      const mn = Math.min(...withData);
+      const mx = Math.max(...withData);
       return vals.map(v => {
-        const n = v > 0 && mx !== mn ? (Number(v) - mn) / (mx - mn) : v > 0 ? 0.5 : 0;
+        if (!v || v <= 0) return 0;  // no data = no score
+        const n = mx !== mn ? (v - mn) / (mx - mn) : 1;
         return invert ? 1 - n : n;
       });
     };
@@ -2398,22 +2401,39 @@ const APP = {
     const fobs  = rawCots.map(c => c.logistics?.fob_num || parseFloat(String(c.fob||'').replace(/[^0-9.]/g,''))||0);
     const moqs  = rawCots.map(c => c.logistics?.moq  || 0);
     const leads = rawCots.map(c => c.logistics?.lead_time || 0);
-    const techs = rawCots.map(c => (c.logistics?.tech_score || 0) / 100);
 
-    const nFob  = normalize(fobs,  true);
-    const nMoq  = normalize(moqs,  true);
-    const nLead = normalize(leads, true);
-    const nTech = techs;
+    // Tech score: count non-null tech specs as proxy
+    const techs = rawCots.map(c => {
+      const specs = c.techNorm || c.techSpecs || {};
+      const total = Object.values(specs).filter(v => v && v !== 'null').length;
+      return Math.min(total / 8, 1); // normalize: 8+ specs = 100%
+    });
 
-    return rawCots.map((c, i) => ({
-      ...c,
-      fob_num:   fobs[i],
-      score:     Math.round(((nFob[i]*wPrecio + nTech[i]*wSpecs + nMoq[i]*wMoq + nLead[i]*wLead) / totalW) * 1000) / 10,
-      n_fob:     Math.round(nFob[i]*100),
-      n_tech:    Math.round(nTech[i]*100),
-      n_moq:     Math.round(nMoq[i]*100),
-      n_lead:    Math.round(nLead[i]*100),
-    })).sort((a,b) => b.score - a.score);
+    const nFob  = normalize(fobs,  true);   // lower FOB = better
+    const nMoq  = normalize(moqs,  true);   // lower MOQ = better
+    const nLead = normalize(leads, true);   // lower lead = better
+    const nTech = techs;                    // more specs = better
+
+    return rawCots.map((c, i) => {
+      // Data completeness bonus: penalize providers with no logistics data
+      const hasData = (fobs[i] > 0 ? 1 : 0) + (moqs[i] > 0 ? 1 : 0) +
+                      (leads[i] > 0 ? 1 : 0) + (techs[i] > 0 ? 1 : 0);
+      const completeness = hasData / 4;
+
+      const rawScore = (nFob[i]*wPrecio + nTech[i]*wSpecs + nMoq[i]*wMoq + nLead[i]*wLead) / totalW;
+      const score    = rawScore * (0.5 + 0.5 * completeness); // penalize incomplete data
+
+      return {
+        ...c,
+        fob_num:        fobs[i],
+        score:          Math.round(score * 1000) / 10,
+        n_fob:          Math.round(nFob[i]*100),
+        n_tech:         Math.round(nTech[i]*100),
+        n_moq:          Math.round(nMoq[i]*100),
+        n_lead:         Math.round(nLead[i]*100),
+        data_complete:  Math.round(completeness * 100),
+      };
+    }).sort((a,b) => b.score - a.score);
   },
 
   // ── Render V2 — full benchmark with logistics + specs table + narrative ────

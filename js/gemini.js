@@ -412,29 +412,33 @@ Respondé SOLO con JSON válido, sin backticks:
   },
 
   // ── Extract 7 fixed logistics fields from file text ─────────────────────
-  async extractLogistics(fileText, fobHint = '') {
+  async extractLogistics(fileText, fobHint = '', productDesc = '') {
     const prompt = `Sos un analista de compras internacionales especializado en cotizaciones de proveedores chinos.
 El siguiente texto fue extraído de una cotización de proveedor (puede ser Excel, PDF o Word).
-El texto puede estar en inglés, chino o español, con abreviaturas comunes del comercio internacional.
+Puede estar en inglés, chino o español. El archivo puede tener UN solo producto o MÚLTIPLES productos.
 
+PRODUCTO QUE BUSCAMOS: ${productDesc || 'producto principal de la cotización'}
 TEXTO DE LA COTIZACIÓN:
 ${fileText.substring(0, 8000)}
-${fobHint ? `\nNOTA: El sistema registra el FOB como: ${fobHint}` : ''}
+${fobHint ? `\nNOTA: El sistema ya tiene registrado el FOB como: ${fobHint}` : ''}
 
-INSTRUCCIONES DE EXTRACCIÓN:
-- "fob_num": precio FOB como número decimal (ej: 4.56). Buscá "FOB", "Unit price", "Price", "$". Solo el número, sin símbolos.
-- "puerto": puerto de origen (ej: "NINGBO", "SHANGHAI", "GUANGZHOU"). Buscá "PORT", "FOB Port".
-- "ctn_size": dimensiones de la caja en cm formato LxWxH (ej: "60x60x52"). Buscá "CTN size", "Carton size", "Packing size", "Box size".
-- "ctn_weight": peso de la caja en kg como número (ej: 15). Buscá "CTN G.W", "Gross weight", "GW", "Weight per carton".
-- "pcs_ctn": unidades por caja como número entero (ej: 9). Buscá "PCS/CTN", "CTN qty", "Qty per carton", "Units per box".
-- "lead_time": tiempo de producción en días como número entero (ej: 30). Buscá "Lead time", "Delivery time", "Production time". Convertí semanas a días (ej: "4 weeks" = 28).
-- "payment_terms": condiciones de pago como texto (ej: "30% deposit, 70% BL"). Buscá "Payment", "Terms", "T/T".
-- "modelo": número de modelo o SKU del proveedor (ej: "LSF-086"). Buscá "Model", "Item no", "SKU", "Part no", "Ref".
-- "tech_score": dejalo en 0, se calcula después.
+Si hay MÚLTIPLES productos en el texto, enfocate en el que más se parezca al producto buscado.
+Si hay UN solo producto, extraé sus datos directamente.
 
-Si un campo no aparece en el texto, usá null. No inventes datos.
+INSTRUCCIONES DE EXTRACCIÓN (buscá estas variantes de nombres):
+- "fob_num": precio FOB/EXW/Unit price como número decimal (ej: 14.2). Solo el número sin símbolos.
+- "puerto": puerto de origen (ej: "NINGBO"). Si dice EXW sin puerto, dejá vacío string.
+- "ctn_size": dimensiones de la CAJA DE ENVÍO formato LxWxH en cm (ej: "54x46x24"). Buscá "CTN size", "Carton size", "Box size". NO usar dimensiones del producto.
+- "ctn_weight": peso bruto caja en kg (ej: 15.5). Buscá "Gross weight", "GW", "CTN G.W", "kg/carton", "kg per carton".
+- "pcs_ctn": unidades por caja, número entero (ej: 30). Buscá "per carton", "PCS/CTN", "CTN qty", "pcs per ctn".
+- "lead_time": días de producción, número entero. Convertí: "5-7 working days"→7, "4 weeks"→28, "30 days"→30.
+- "payment_terms": condiciones de pago completas. Ej: "50% deposit, 50% balance before shipment".
+- "modelo": código de modelo del proveedor. Buscá "Model", "Item No", "SKU", "Part no". Ej: "GMC-301".
+- "tech_score": siempre 0.
 
-Respondé SOLO con JSON válido, sin backticks ni texto adicional:
+Si un campo genuinamente no aparece en el texto, usá null. No inventes.
+
+Respondé SOLO con JSON válido, sin backticks:
 {
   "fob_num": null,
   "puerto": "",
