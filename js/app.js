@@ -1448,8 +1448,8 @@ const APP = {
         <h2>Configuración</h2>
 
         <div class="config-section">
-          <h3>🤖 Gemini API Key</h3>
-          <p class="config-hint">Obtenela en <a href="https://aistudio.google.com" target="_blank">aistudio.google.com</a> → Get API Key</p>
+          <h3>🤖 Google Gemini API Key</h3>
+          <p class="config-hint">Obtenela en <a href="https://aistudio.google.com" target="_blank">aistudio.google.com</a> → Get API Key · Modelo: <strong>gemini-2.0-flash</strong></p>
           <div class="form-row-2">
             <div class="form-group">
               <input type="password" id="cfg-gemini" value="${s.geminiKey||''}" placeholder="AIza...">
@@ -2070,6 +2070,52 @@ const APP = {
   },
 
   // ── Run full AI analysis on all cotizaciones ──────────────────────────────
+  // ── Extract text from a base64-encoded PDF using pdf.js ─────────────────
+  // Called when Apps Script returns a PDF as base64 bytes.
+  // Loads pdf.js from CDN if not already loaded, then extracts all text.
+  async _extractPdfFromBase64(base64) {
+    // Load pdf.js if not already loaded
+    if (!window.pdfjsLib) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+
+    try {
+      // Convert base64 to Uint8Array
+      const binary = atob(base64);
+      const bytes  = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+      // Load PDF and extract all text
+      const pdf   = await window.pdfjsLib.getDocument({ data: bytes }).promise;
+      const pages = Math.min(pdf.numPages, 10); // max 10 pages
+      let   text  = '';
+
+      for (let p = 1; p <= pages; p++) {
+        const page    = await pdf.getPage(p);
+        const content = await page.getTextContent();
+        const pageText = content.items
+          .map(item => item.str)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (pageText) text += pageText + '\n\n';
+      }
+
+      return text.substring(0, 15000);
+    } catch(e) {
+      console.warn('pdf.js extraction failed:', e.message);
+      return '';
+    }
+  },
+
   async cotRunAnalysis() {
     const row = this.state.cotSelected;
     if (!row) return;
@@ -2130,16 +2176,31 @@ const APP = {
       for (const c of cots) {
         setStatus(`Extrayendo datos de cotización ${c.n}/${cots.length} — ${c.proveedor}…`);
         try {
-          // Get file text via Apps Script
+          // Get file text via Apps Script + smart fallbacks
           let fileText = '';
           const isDrive = c.url && (
             c.url.includes('drive.google.com') ||
             c.url.includes('docs.google.com')
           );
+
           if (isDrive) {
-            const extracted = await DB._get({ action: 'extractFile', fileUrl: c.url });
-            if (extracted.ok) fileText = extracted.text || '';
+            // Use POST to avoid URL length limits (PDFs return base64 which is large)
+            const extracted = await DB._post({
+              action:  'extractFilePOST',
+              fileUrl: c.url,
+              sku:     row['SKU'] || '',
+              refUrl:  row['Link de Referencia'] || ''
+            });
+
+            if (extracted.isPdf && extracted.base64) {
+              // PDF returned as base64 — process with pdf.js in browser
+              fileText = await _extractPdfFromBase64(extracted.base64);
+            } else if (extracted.ok && extracted.text) {
+              fileText = extracted.text;
+            }
           }
+
+          // Fallback for non-Drive URLs or if Drive extraction failed
           if (!fileText) {
             try {
               const jina = await fetch(`https://r.jina.ai/${c.url}`, {
