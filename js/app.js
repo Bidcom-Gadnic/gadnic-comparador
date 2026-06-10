@@ -1970,7 +1970,7 @@ const APP = {
         proveedor: row[`Proveedor ${n}`] || `Cotización ${n}`,
         modelo:    row[`Modelo ${n}`] || '',
       }))
-      .filter(c => c.url);
+      .filter(c => c.url && c.url.startsWith('http') && !['sin respuesta','sin cotización','n/a','na','-',''].includes(c.url.trim().toLowerCase()));
 
     mainEl.innerHTML = `
       <div class="cot-panel">
@@ -2095,7 +2095,7 @@ const APP = {
         proveedor: row[`Proveedor ${n}`] || `Cotización ${n}`,
         modelo:    row[`Modelo ${n}`] || '',
       }))
-      .filter(c => c.url);
+      .filter(c => c.url && c.url.startsWith('http') && !['sin respuesta','sin cotización','n/a','na','-',''].includes(c.url.trim().toLowerCase()));
 
     // Progress tracker
     const steps  = 2 + cots.length + 3; // ref + per-cot + normalize + category + benchmark

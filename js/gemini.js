@@ -414,16 +414,25 @@ Respondé SOLO con JSON válido, sin backticks:
   // ── Extract 7 fixed logistics fields from file text ─────────────────────
   async extractLogistics(fileText, fobHint = '') {
     const prompt = `Sos un analista de compras internacionales especializado en cotizaciones de proveedores chinos.
-Extraé los datos logísticos del siguiente texto de cotización.
+El siguiente texto fue extraído de una cotización de proveedor (puede ser Excel, PDF o Word).
+El texto puede estar en inglés, chino o español, con abreviaturas comunes del comercio internacional.
 
-TEXTO:
-${fileText.substring(0, 6000)}
-${fobHint ? `\nEl campo FOB del sistema indica: ${fobHint}` : ''}
+TEXTO DE LA COTIZACIÓN:
+${fileText.substring(0, 8000)}
+${fobHint ? `\nNOTA: El sistema registra el FOB como: ${fobHint}` : ''}
 
-Extraé EXACTAMENTE estos 7 campos. Si un dato no está presente usá null.
-Para lead_time extraé solo el número de días.
-Para fob_num extraé solo el número (sin USD ni texto).
-Para ctn_size extraé en formato "LxWxH" con las dimensiones en cm.
+INSTRUCCIONES DE EXTRACCIÓN:
+- "fob_num": precio FOB como número decimal (ej: 4.56). Buscá "FOB", "Unit price", "Price", "$". Solo el número, sin símbolos.
+- "puerto": puerto de origen (ej: "NINGBO", "SHANGHAI", "GUANGZHOU"). Buscá "PORT", "FOB Port".
+- "ctn_size": dimensiones de la caja en cm formato LxWxH (ej: "60x60x52"). Buscá "CTN size", "Carton size", "Packing size", "Box size".
+- "ctn_weight": peso de la caja en kg como número (ej: 15). Buscá "CTN G.W", "Gross weight", "GW", "Weight per carton".
+- "pcs_ctn": unidades por caja como número entero (ej: 9). Buscá "PCS/CTN", "CTN qty", "Qty per carton", "Units per box".
+- "lead_time": tiempo de producción en días como número entero (ej: 30). Buscá "Lead time", "Delivery time", "Production time". Convertí semanas a días (ej: "4 weeks" = 28).
+- "payment_terms": condiciones de pago como texto (ej: "30% deposit, 70% BL"). Buscá "Payment", "Terms", "T/T".
+- "modelo": número de modelo o SKU del proveedor (ej: "LSF-086"). Buscá "Model", "Item no", "SKU", "Part no", "Ref".
+- "tech_score": dejalo en 0, se calcula después.
+
+Si un campo no aparece en el texto, usá null. No inventes datos.
 
 Respondé SOLO con JSON válido, sin backticks ni texto adicional:
 {
@@ -444,32 +453,41 @@ Respondé SOLO con JSON válido, sin backticks ni texto adicional:
 
   // ── Extract tech specs from file text ────────────────────────────────────
   async extractTechSpecs(fileText, productDesc, refSpecs) {
-    const refContext = refSpecs?.specs_obj
-      ? `Specs del producto de referencia: ${JSON.stringify(refSpecs.specs_obj)}`
-      : refSpecs?.specs || '';
+    const refContext = refSpecs?.specs_obj && Object.keys(refSpecs.specs_obj).length
+      ? `Especificaciones del producto de referencia ideal:\n${Object.entries(refSpecs.specs_obj).map(([k,v])=>`- ${k}: ${v}`).join('\n')}`
+      : refSpecs?.specs
+        ? `Descripción del producto de referencia: ${refSpecs.specs}`
+        : '';
 
-    const prompt = `Sos un analista de productos de consumo.
-Extraé TODAS las especificaciones técnicas del siguiente texto de cotización de proveedor.
+    const prompt = `Sos un analista de productos de consumo especializado en importaciones desde China.
+El siguiente texto fue extraído de una cotización de proveedor. Puede estar en inglés, chino o español.
 
-DESCRIPCIÓN DEL PRODUCTO: ${productDesc}
-${refContext ? `\n${refContext}` : ''}
-
+PRODUCTO: ${productDesc}
+${refContext ? `\n${refContext}\n` : ''}
 TEXTO DE LA COTIZACIÓN:
-${fileText.substring(0, 6000)}
+${fileText.substring(0, 8000)}
 
-Reglas:
-- Extraé solo specs técnicas del producto (no datos logísticos como FOB, CTN, lead time)
-- Normalizá los nombres de specs en español
-- Incluí valores con sus unidades
-- Si una spec aparece con nombre diferente al de referencia pero es lo mismo, usá el nombre de referencia
+Tu tarea es extraer TODAS las especificaciones técnicas del PRODUCTO (no de la caja/embalaje).
+Excluí: FOB, precio, CTN size, CTN weight, PCS/CTN, lead time, payment terms, puerto.
+Incluí: material, dimensiones del producto, peso del producto, colores, funciones, certificaciones,
+        temperatura, voltaje, potencia, capacidad, acabado, tecnología, accesorios incluidos, y
+        cualquier otra característica técnica del producto.
 
-Respondé SOLO con JSON válido, sin backticks:
+Normalizá los nombres de specs en español claro y conciso.
+Para cada spec incluí el valor con su unidad si la tiene.
+Si la referencia tiene specs, intentá usar los mismos nombres de campo cuando corresponda.
+
+Respondé SOLO con un objeto JSON válido, sin backticks, con todas las specs encontradas:
 {
-  "Material principal": "valor o null",
-  "Dimensiones": "valor o null",
-  "Capacidad": "valor o null",
-  "...otras specs que encuentres": "valor"
-}`;
+  "Material": "EVA foam",
+  "Dimensiones del producto": "50 × 500 cm",
+  "Espesor": "4 mm",
+  "Rango de temperatura": "10-70 °C",
+  "Color disponible": "Negro",
+  "...": "..."
+}
+
+Si no encontrás ninguna spec técnica del producto, respondé con {}.`;
 
     try {
       const text = await this._call(prompt);
