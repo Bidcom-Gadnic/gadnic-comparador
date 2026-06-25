@@ -8,33 +8,208 @@
 const SCPARSER = {
 
   // ── Master entry point ────────────────────────────────────────────────────
-  // Receives raw text + optional hints, returns structured logistics object
+  // 1. Detects document type (invoice, catalogue, packaging, freeform)
+  // 2. Routes to the right parser
+  // 3. Fills blanks from Sheet column hints
   parseLogistics(rawText, { skuHint = '', refUrlHint = '', fobHint = '' } = {}) {
     if (!rawText || !rawText.trim()) return this._empty();
 
-    const text = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    // Normalize + strip DISPIMG formulas (Excel image cells)
+    const text = rawText
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/=DISPIMG\([^)]+\)/gi, '')
+      .replace(/DISPIMG\([^)]+\)/gi, '');
 
-    // Detect format and route accordingly
-    const lines     = text.split('\n').map(l => l.trim()).filter(Boolean);
-    const isCSV     = this._detectCSV(lines);
+    const lines      = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const docType    = this._detectDocumentType(text, lines);
+    const isCSV      = this._detectCSV(lines);
     const hasHeaders = this._detectExplicitHeaders(lines);
 
     let result;
-    if (isCSV && hasHeaders) {
-      result = this._parseCSVWithHeaders(lines, skuHint, refUrlHint);
-    } else if (isCSV) {
-      result = this._parseCSVFreeform(lines, skuHint, refUrlHint);
-    } else {
-      result = this._parseTextFreeform(text);
+
+    switch (docType) {
+      case 'packaging':
+        // Packaging/box design — no logistics, only product specs
+        result = { ...this._empty(), _docType: 'packaging', specs_raw: text.substring(0, 2000) };
+        break;
+
+      case 'catalogue_qty_price':
+        // Catalogue with price tiers (20: $X, 100: $Y, 1000: $Z)
+        result = this._parseCatalogueQtyPrice(text, lines, skuHint, refUrlHint);
+        break;
+
+      case 'catalogue_multi_model':
+        // Catalogue with multiple models/variants (capacity, color, etc.)
+        result = isCSV && hasHeaders
+          ? this._parseCSVWithHeaders(lines, skuHint, refUrlHint)
+          : this._parseCatalogueMultiModel(text, lines, skuHint);
+        break;
+
+      case 'proforma':
+      case 'invoice':
+        // Proforma invoice — single product, structured table
+        result = isCSV && hasHeaders
+          ? this._parseCSVWithHeaders(lines, skuHint, refUrlHint)
+          : this._parseTextFreeform(text);
+        break;
+
+      default:
+        // Freeform / unknown — try all parsers
+        if (isCSV && hasHeaders) {
+          result = this._parseCSVWithHeaders(lines, skuHint, refUrlHint);
+        } else if (isCSV) {
+          result = this._parseCSVFreeform(lines, skuHint, refUrlHint);
+        } else {
+          result = this._parseTextFreeform(text);
+        }
     }
 
-    // Fill blanks with hint from Sheet column
+    result._docType = result._docType || docType;
+
+    // Fill blanks with hint from Sheet FOB column
     if (!result.fob_num && fobHint) {
       const m = String(fobHint).match(/[\d]+\.?[\d]*/);
       if (m) result.fob_num = parseFloat(m[0]);
     }
 
     return result;
+  },
+
+  // ── Document type detector ─────────────────────────────────────────────────
+  _detectDocumentType(text, lines) {
+    const t = text.toLowerCase();
+
+    // Packaging/box design — has multi-language content, no FOB/price
+    const langMarkers = ['警告', '경고', '警告', 'warnung', 'avertissement', 'предупреждение'];
+    const hasMultiLang = langMarkers.filter(m => text.includes(m)).length >= 2;
+    const hasNoPrice   = !/(fob|unit price|exw|\$\s*\d+\.\d{2})/i.test(text.substring(0, 500));
+    if (hasMultiLang && hasNoPrice) return 'packaging';
+
+    // Catalogue with quantity-based pricing: "20: $X, 100: $Y" or "20：$X"
+    const qtyPricePattern = /\b(20|50|100|500|1000)\s*[：:]\s*\$[\d.]+/;
+    if (qtyPricePattern.test(text)) return 'catalogue_qty_price';
+
+    // Proforma invoice
+    if (/(proforma\s*invoice|invoice\s*no\.?|to:\s*\n|unit\s*price.*quantity.*amount)/i.test(text)) return 'proforma';
+
+    // Multi-model catalogue (no explicit proforma, has many model numbers)
+    const modelNumbers = (text.match(/\b[A-Z]{1,4}\d{2,4}[A-Z+]?\b/g) || []).length;
+    if (modelNumbers >= 5) return 'catalogue_multi_model';
+
+    return 'freeform';
+  },
+
+  // ── Parser: catalogue with quantity-tier pricing ───────────────────────────
+  // Handles: "20: $11.98  100: $11.65  1000: $10.75" per product
+  _parseCatalogueQtyPrice(text, lines, skuHint, refUrlHint) {
+    // Find the most relevant product block
+    const blocks = this._splitIntoProductBlocks(text);
+    const target = this._findBestBlock(blocks, skuHint, refUrlHint);
+    const src    = target || text;
+
+    // Extract lowest tier price (MOQ price = first/lowest quantity)
+    const fob = this._extractTierPrice(src, 'lowest');
+
+    // Extract packing details
+    const ctnMatch  = src.match(/(\d+)\s*(?:pieces?|pcs?)\s*per\s*box/i);
+    const sizeMatch = src.match(/[Bb]ox\s*size\s*[:：]?\s*([\d.]+\s*[*×xX]\s*[\d.]+\s*[*×xX]\s*[\d.]+)\s*cm/i);
+    const wgtMatch  = src.match(/[Ww]eight\s*[:：]?\s*([\d.]+)\s*kg/i);
+    const moqMatch  = src.match(/(\d+)\s*(?:pieces?|pcs?)\s*per\s*box/i)
+                   || src.match(/MOQ\s*[:：]?\s*(\d+)/i);
+
+    // Extract model from Item No column or beginning of block
+    const modelMatch = src.match(/\b([A-Z]{1,4}[-]?\d{3,6}[A-Za-z+]?)\b/);
+
+    return {
+      fob_num:       fob,
+      puerto:        '',
+      ctn_size:      sizeMatch ? this._cleanSize(sizeMatch[1]) : '',
+      ctn_weight:    wgtMatch  ? parseFloat(wgtMatch[1]) : null,
+      pcs_ctn:       ctnMatch  ? parseInt(ctnMatch[1]) : null,
+      lead_time:     this._extractLead(text),
+      payment_terms: this._extractPayment(text),
+      modelo:        modelMatch ? modelMatch[1] : '',
+      moq:           moqMatch ? parseInt(moqMatch[1]) : null,
+      specs_raw:     src.substring(0, 800),
+    };
+  },
+
+  // ── Extract price from quantity tiers ─────────────────────────────────────
+  // "20: $11.98  100: $11.65  1000: $10.75" → 11.98 (lowest MOQ = highest price)
+  // "20：$11.98" (Chinese colon) also handled
+  _extractTierPrice(text, mode = 'lowest') {
+    const tierPattern = /\b(\d+)\s*[：:]\s*\$?\s*([\d.]+)/g;
+    const tiers = [];
+    let m;
+    while ((m = tierPattern.exec(text)) !== null) {
+      const qty   = parseInt(m[1]);
+      const price = parseFloat(m[2]);
+      if (qty >= 10 && qty <= 100000 && price > 0.1 && price < 100000) {
+        tiers.push({ qty, price });
+      }
+    }
+    if (!tiers.length) return null;
+    tiers.sort((a, b) => a.qty - b.qty);
+    // 'lowest' MOQ = first tier (usually most expensive per unit)
+    return mode === 'lowest' ? tiers[0].price : tiers[tiers.length - 1].price;
+  },
+
+  // ── Split catalogue text into per-product blocks ───────────────────────────
+  _splitIntoProductBlocks(text) {
+    // Products typically start with a model number (uppercase letters + digits)
+    const modelPattern = /(?:^|\n)([A-Z]{1,5}[-]?\d{2,6}[A-Za-z+]*)\s/gm;
+    const positions = [];
+    let match;
+    while ((match = modelPattern.exec(text)) !== null) {
+      positions.push(match.index);
+    }
+    if (positions.length < 2) return [text];
+
+    return positions.map((pos, i) => {
+      const end = positions[i + 1] ?? text.length;
+      return text.slice(pos, end);
+    });
+  },
+
+  // ── Find best matching product block ──────────────────────────────────────
+  _findBestBlock(blocks, skuHint, refUrlHint) {
+    if (blocks.length === 1) return blocks[0];
+    const hints = [skuHint, refUrlHint].filter(Boolean).map(h => h.toLowerCase());
+    if (!hints.length) return blocks[0];
+
+    let best = blocks[0], bestScore = -1;
+    blocks.forEach(block => {
+      const lower = block.toLowerCase();
+      const words = hints.flatMap(h => h.replace(/[^a-z0-9]/g,' ').split(/\s+/).filter(w=>w.length>3));
+      const score = words.filter(w => lower.includes(w)).length;
+      if (score > bestScore) { bestScore = score; best = block; }
+    });
+    return best;
+  },
+
+  // ── Parser: multi-model catalogue (e.g. voice recorders) ──────────────────
+  _parseCatalogueMultiModel(text, lines, skuHint) {
+    // Find the block matching the SKU hint
+    const blocks = this._splitIntoProductBlocks(text);
+    const target = this._findBestBlock(blocks, skuHint, '');
+    const src    = target || text;
+
+    const fob      = this._extractFOB(src) || this._extractTierPrice(src, 'lowest');
+    const sizeText = src.match(/(\d+[*×xX]\d+[*×xX]?\d*\s*mm)/i);
+
+    return {
+      fob_num:       fob,
+      puerto:        '',
+      ctn_size:      '',  // unit size only, no ctn in catalogues
+      ctn_weight:    null,
+      pcs_ctn:       null,
+      lead_time:     null,
+      payment_terms: '',
+      modelo:        (src.match(/\b([A-Z]{1,4}[-]?\d{2,6}[A-Za-z+]*)\b/) || [])[1] || '',
+      moq:           null,
+      specs_raw:     src.substring(0, 800),
+    };
   },
 
   // ── Detect if text is CSV-like (has many comma/tab separators) ────────────
@@ -108,7 +283,7 @@ const SCPARSER = {
   _mapHeaders(headers) {
     const map = {};
     const rules = [
-      { key: 'fob',           patterns: ['fob','unit price','exw','price (usd)','price(usd)','unit_price'] },
+      { key: 'fob',           patterns: ['fob','unit price','exw','price (usd)','price(usd)','unit_price','fob  (usd)','unit price (usd)','exw unit price'] },
       { key: 'port',          patterns: ['port','puerto','fob port'] },
       { key: 'moq',           patterns: ['moq','quantity','qty','cantidad','minimum'] },
       { key: 'ctn_size',      patterns: ['ctn size','ctn sizes','carton size','packing size','box size','packing info'] },
@@ -201,15 +376,22 @@ const SCPARSER = {
 
   _extractFOB(text) {
     const patterns = [
-      /(?:fob|exw|unit\s*price|price)[:\s]*(?:usd\s*)?\$?\s*([\d]+\.?[\d]*)/i,
-      /\$\s*([\d]+\.[\d]{1,2})\s*(?:usd|per\s*pc|\/pc|per\s*unit)?/i,
-      /(?:^|[\s,])([\d]+\.[\d]{2})\s*(?:usd|,\s*ningbo|,\s*shanghai|,\s*guangzhou|,\s*shenzhen)/im,
+      // Explicit label with price
+      /(?:fob|exw|unit\s*price|price\s*\(usd\)|unit\s*price\s*\(usd\))\s*[:\s]*(?:usd\s*)?\$?\s*([\d]+\.?[\d]*)/i,
+      // "$X.XX USD/PC" or "$X.XX per unit"
+      /\$\s*([\d]+\.[\d]{1,2})\s*(?:usd|\/pc|per\s*(?:pc|unit|piece))?/i,
+      // "USD 246/PC"
+      /usd\s+([\d]+\.?[\d]*)\s*\/\s*(?:pc|piece|unit)/i,
+      // Bare number followed by port city
+      /(?:^|[\s,])([\d]+\.[\d]{2})\s*(?:usd|,\s*(?:ningbo|shanghai|guangzhou|shenzhen|xiamen|qingdao))/im,
+      // EXW terms: "1. EXW ... 3.09"
+      /exw[^$\d]{0,30}([\d]+\.[\d]{2})/i,
     ];
     for (const p of patterns) {
       const m = text.match(p);
       if (m) {
         const val = parseFloat(m[1]);
-        if (val > 0.5 && val < 50000) return val; // sanity check
+        if (val > 0.1 && val < 500000) return val;
       }
     }
     return null;
@@ -245,19 +427,31 @@ const SCPARSER = {
   },
 
   _extractLead(text) {
-    // "30 days", "5-7 working days", "4 weeks", "around 30 days"
-    const m = text.match(/(?:lead\s*time|delivery\s*time|production\s*time|leadtimes?)[:\s]*(?:around\s*)?(\d+)(?:\s*-\s*(\d+))?\s*(days?|working\s*days?|weeks?)/i);
-    if (m) {
-      const n    = m[2] ? parseInt(m[2]) : parseInt(m[1]); // take max of range
-      const unit = m[3].toLowerCase();
-      return unit.includes('week') ? n * 7 : n;
+    // "about 10-15 business days", "35-40 DAYS", "5 working days", "4 weeks"
+    const patterns = [
+      /(?:lead\s*time|delivery\s*time|production\s*time|leadtimes?|shipped?\s*(?:in|within|approximately))\s*[：:\s]*(?:about\s*|around\s*|approximately\s*)?(\d+)\s*(?:-\s*(\d+))?\s*(business\s*days?|working\s*days?|days?|weeks?)/i,
+      /(\d+)\s*(?:-\s*(\d+))?\s*(business\s*days?|working\s*days?)\s*(?:after|from)/i,
+      /shipped?\s*approximately\s*(\d+)\s*(days?|weeks?)/i,
+    ];
+    for (const p of patterns) {
+      const m = text.match(p);
+      if (m) {
+        const n    = m[2] ? parseInt(m[2]) : parseInt(m[1]);
+        const unit = (m[3] || 'days').toLowerCase();
+        return unit.includes('week') ? n * 7 : n;
+      }
     }
     return null;
   },
 
   _extractPayment(text) {
-    const m = text.match(/(?:payment\s*terms?|terms\s*of\s*payment|condiciones\s*de\s*pago)[:\s]*([^\n\r,]{10,80})/i);
-    return m ? m[1].trim() : '';
+    // Named payment terms
+    const m = text.match(/(?:payment\s*terms?|terms?\s*of\s*payment|condiciones\s*de\s*pago)\s*[：:]\s*([^\n\r]{5,120})/i);
+    if (m) return m[1].trim().substring(0, 100);
+    // Standalone incoterms (DAP, DDP, FOB, EXW, CIF, CFR)
+    const inco = text.match(/\b(DAP|DDP|CIF|CFR|CPT|CIP|FCA|FAS|FOB|EXW)\b.*?(?:\n|$)/m);
+    if (inco) return inco[0].trim().substring(0, 80);
+    return '';
   },
 
   _extractModel(text) {
@@ -335,33 +529,94 @@ const SCPARSER = {
     };
   },
 
-  // ── Extract tech specs from structured text (no AI needed for known fields) ─
-  // Returns key-value pairs found in the text
+  // ── Rejoin multiline quoted CSV cells into single lines ───────────────────
+  // Handles: "cell content\nspanning\nmultiple lines" → single line
+  _rejoinMultilineCSV(text) {
+    const lines   = text.split('\n');
+    const result  = [];
+    let   buffer  = '';
+    let   inQuote = false;
+
+    for (const line of lines) {
+      const quoteCount = (line.match(/"/g) || []).length;
+      if (!inQuote) {
+        if (quoteCount % 2 === 1) {
+          // Odd number of quotes — starts a multiline quoted cell
+          buffer  = line;
+          inQuote = true;
+        } else {
+          result.push(line);
+        }
+      } else {
+        buffer += ' ' + line.trim();
+        if (quoteCount % 2 === 1) {
+          // Closes the quoted cell
+          result.push(buffer);
+          buffer  = '';
+          inQuote = false;
+        }
+      }
+    }
+    if (buffer) result.push(buffer);
+    return result.join('\n');
+  },
+
+  // ── Extract tech specs from structured text ──────────────────────────────
+  // Handles: proforma invoices, catalogues, freeform text, multi-lang docs
   parseTechSpecs(rawText, { knownFields = [] } = {}) {
     if (!rawText || !rawText.trim()) return {};
-    const specs = {};
-    const text  = rawText.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
 
-    // Pattern 1: "Key: Value" or "Key - Value"
-    const kvPattern = /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\/\-]{2,40}?)[:\-]\s*(.{1,100})$/gm;
+    const text = rawText
+      .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      .replace(/=DISPIMG\([^)]+\)/gi, '')   // strip Excel image formulas
+      .replace(/\b\d+\s*[：:]\s*\$[\d.]+/g, ''); // strip price tiers
+
+    const specs = {};
+
+    // Skip these as they are logistics, not product specs
+    const SKIP = ['fob','price','port','ctn size','ctn weight','pcs/ctn','pieces per',
+                  'carton','moq','lead time','payment','address','phone','mail',
+                  'company','contact','whatsapp','leadtime','delivery'];
+
+    const isLogistics = (key) => SKIP.some(s => key.toLowerCase().includes(s));
+
+    // Pattern 1: "Key: Value" on its own line
+    const kvPattern = /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\/\(\)\-+]{2,50}?)\s*[:：]\s*(.{1,150})$/gm;
     let m;
     while ((m = kvPattern.exec(text)) !== null) {
       const key = m[1].trim();
-      const val = m[2].trim().replace(/[,;]+$/, '');
-      // Skip logistics fields
-      const skipKeys = ['fob','price','port','ctn','carton','moq','lead','payment','address','phone','mail','company'];
-      if (!skipKeys.some(s => key.toLowerCase().includes(s)) && val && val.length < 80) {
+      const val = m[2].trim().replace(/[,;]+$/, '').replace(/^\$/, '');
+      if (!isLogistics(key) && val && val.length < 150 && val.length > 0
+          && !/^\$?[\d.]+$/.test(val)) {  // skip bare numbers (prices)
         specs[key] = val;
       }
     }
 
-    // Pattern 2: Numbered list "1. Key: Value" or "1) Key: Value"
-    const numberedPattern = /^\d+[.)]\s*([A-Za-zÀ-ÿ][^:\n]{2,40}?):\s*(.{1,80})$/gm;
+    // Pattern 2: Numbered specs "1. Input voltage: DC 5V"
+    const numberedPattern = /^\d+[.)]\s*([A-Za-zÀ-ÿ][^:\n]{2,50}?)\s*:\s*(.{1,100})$/gm;
     while ((m = numberedPattern.exec(text)) !== null) {
       const key = m[1].trim();
       const val = m[2].trim();
-      if (key && val && !specs[key]) specs[key] = val;
+      if (!isLogistics(key) && key && val && !specs[key]) specs[key] = val;
     }
+
+    // Pattern 3: Catalogue inline format "Material: ABS Battery: 550mAh"
+    // Split compound lines and extract
+    const inlinePattern = /([A-Z][a-zA-Z\s]{2,30}?)\s*:\s*([^:]{3,80}?)(?=\s+[A-Z][a-zA-Z\s]{2,30}:|$)/g;
+    const longLines = text.split('\n').filter(l => l.length > 60 && l.includes(':'));
+    for (const line of longLines) {
+      while ((m = inlinePattern.exec(line)) !== null) {
+        const key = m[1].trim();
+        const val = m[2].trim().replace(/[,;]+$/, '');
+        if (!isLogistics(key) && key.length > 3 && val.length > 1 && !specs[key]) {
+          specs[key] = val;
+        }
+      }
+    }
+
+    // Pattern 4: "Function: X, Y, Z" split into individual features
+    const funcMatch = text.match(/Function\s*:\s*([^\n]{10,200})/i);
+    if (funcMatch) specs['Función'] = funcMatch[1].trim();
 
     return specs;
   },
@@ -3083,7 +3338,7 @@ const APP = {
     const winnerCard = `
       <div class="cot-winner-card" style="margin-bottom:20px">
         <div class="cot-winner-label">🏆 MEJOR COTIZACIÓN — SKU ${sku}</div>
-        <div class="cot-winner-name">${winner.proveedor}${winner.logistics?.modelo?' — '+winner.logistics.modelo:''}</div>
+        <div class="cot-winner-name">${winner.proveedor}${winner.logistics?.modelo?' — '+winner.logistics.modelo:''}${docTypeBadge(winner)}</div>
         <div class="cot-winner-meta">
           ${winner.fob_num?`<span>💰 FOB <strong>USD ${winner.fob_num}</strong></span>`:''}
           ${winner.logistics?.puerto?`<span>🚢 <strong>${winner.logistics.puerto}</strong></span>`:''}
