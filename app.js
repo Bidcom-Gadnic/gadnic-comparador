@@ -3401,7 +3401,7 @@ const APP = {
     const winnerCard = `
       <div class="cot-winner-card" style="margin-bottom:20px">
         <div class="cot-winner-label">🏆 MEJOR COTIZACIÓN — SKU ${sku}</div>
-        <div class="cot-winner-name">${winner.proveedor}${winner.logistics?.modelo?' — '+winner.logistics.modelo:''}${docTypeBadge(winner)}</div>
+        <div class="cot-winner-name">${winner.proveedor}${winner.logistics?.modelo?' — '+winner.logistics.modelo:''}</div>
         <div class="cot-winner-meta">
           ${winner.fob_num?`<span>💰 FOB <strong>USD ${winner.fob_num}</strong></span>`:''}
           ${winner.logistics?.puerto?`<span>🚢 <strong>${winner.logistics.puerto}</strong></span>`:''}
