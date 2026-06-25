@@ -214,10 +214,18 @@ const SCPARSER = {
 
   // ── Detect if text is CSV-like (has many comma/tab separators) ────────────
   _detectCSV(lines) {
-    const sample = lines.slice(0, 10);
+    const sample = lines.slice(0, 15);
     const commas = sample.filter(l => (l.match(/,/g)||[]).length >= 3).length;
     const tabs   = sample.filter(l => (l.match(/\t/g)||[]).length >= 2).length;
-    return commas >= 3 || tabs >= 3;
+    return commas >= 3 || tabs >= 2;
+  },
+
+  // ── Detect separator (tab or comma) ──────────────────────────────────────
+  _detectSeparator(lines) {
+    const sample = lines.slice(0, 10).join('\n');
+    const tabs   = (sample.match(/\t/g) || []).length;
+    const commas = (sample.match(/,/g)  || []).length;
+    return tabs > commas ? '\t' : ',';
   },
 
   // ── Detect if CSV has explicit column headers we can use ──────────────────
@@ -247,7 +255,7 @@ const SCPARSER = {
 
     // Parse headers — detect separator
     const headerLine = lines[headerIdx];
-    const sep        = (headerLine.match(/\t/g)||[]).length > (headerLine.match(/,/g)||[]).length ? '\t' : ',';
+    const sep        = this._detectSeparator(lines);
     const headers    = this._splitCSVLine(headerLine, sep).map(h => h.toLowerCase().trim());
 
     // Map header indices to field names
@@ -260,10 +268,35 @@ const SCPARSER = {
     if (!targetRow) return this._parseTextFreeform(lines.join('\n'));
 
     const cells = this._splitCSVLine(targetRow, sep);
-    const get   = (col) => colMap[col] !== undefined ? (cells[colMap[col]] || '').replace(/^"|"$/g,'').trim() : '';
+    const get   = (col) => {
+      if (colMap[col] === undefined) return '';
+      const raw = (cells[colMap[col]] || '').replace(/^"|"$/g,'').trim();
+      return raw;
+    };
 
     // Extract from company header lines too (lead time, port, payment often there)
     const companyText = lines.slice(0, headerIdx).join('\n');
+
+    // Collect all spec-related columns (some sheets have multiple: Spec + SKYLARK spec)
+    const allSpecCols = Object.entries(colMap)
+      .filter(([k]) => k === 'specs')
+      .map(([, i]) => (cells[i] || '').replace(/^"|"$/g,'').trim())
+      .filter(Boolean)
+      .join('\n');
+
+    // Also scan ALL unmapped columns for spec-looking content
+    const mappedCols = new Set(Object.values(colMap));
+    const extraSpecs = headers.map((h, i) => {
+      if (mappedCols.has(i)) return '';
+      const cell = (cells[i] || '').replace(/^"|"$/g,'').trim();
+      // A spec-looking cell: contains colon-separated values or known spec keywords
+      if (cell && cell.length > 5 && /[:：]|rated|voltage|power|material|capacity|dimension/i.test(cell)) {
+        return cell;
+      }
+      return '';
+    }).filter(Boolean).join('\n');
+
+    const specsRaw = [allSpecCols, extraSpecs].filter(Boolean).join('\n').trim();
 
     return {
       fob_num:       this._parseNum(get('fob') || get('price') || get('unit_price')),
@@ -273,9 +306,9 @@ const SCPARSER = {
       pcs_ctn:       this._parseInt(get('pcs_ctn') || get('qty_ctn') || get('pieces_ctn') || get('moq_ctn')),
       lead_time:     this._parseLead(get('lead_time') || get('delivery') || this._extractLead(companyText)),
       payment_terms: get('payment') || this._extractPayment(companyText),
-      modelo:        get('model') || get('sku') || get('item_no'),
+      modelo:        get('model') || '',
       moq:           this._parseInt(get('moq') || get('quantity') || get('qty')),
-      specs_raw:     get('specs') || get('specification') || get('description'),
+      specs_raw:     specsRaw || get('specs') || '',
     };
   },
 
@@ -283,16 +316,20 @@ const SCPARSER = {
   _mapHeaders(headers) {
     const map = {};
     const rules = [
-      { key: 'fob',           patterns: ['fob','unit price','exw','price (usd)','price(usd)','unit_price','fob  (usd)','unit price (usd)','exw unit price'] },
-      { key: 'port',          patterns: ['port','puerto','fob port'] },
-      { key: 'moq',           patterns: ['moq','quantity','qty','cantidad','minimum'] },
-      { key: 'ctn_size',      patterns: ['ctn size','ctn sizes','carton size','packing size','box size','packing info'] },
-      { key: 'ctn_weight',    patterns: ['ctn weight','gw','gross weight','ctn g.w','g.w','peso caja'] },
-      { key: 'pcs_ctn',       patterns: ['pcs/ctn','pieces per ctn','qty/ctn','pcs per carton','pieces per carton','pcs ctn'] },
-      { key: 'lead_time',     patterns: ['lead time','leadtime','delivery time','production time','tiempo entrega'] },
-      { key: 'payment',       patterns: ['payment','payment terms','terms','condiciones pago'] },
-      { key: 'model',         patterns: ['model','model number','sku','item no','item number','part no','modelo','ref'] },
-      { key: 'specs',         patterns: ['specs','specification','specifications','description','your specifications','descripcion'] },
+      { key: 'fob',        patterns: ['fob price (usd)','fob price','fob unit','unit price (usd)','unit price','exw','fob  (usd)','fob'] },
+      { key: 'port',       patterns: ['port','puerto','fob port'] },
+      { key: 'ctn_size',   patterns: ['ctn size','ctn sizes','carton size','packing size','box size','packing info'] },
+      { key: 'ctn_weight', patterns: ['ctn weight','ctn g.w','gross weight','gw','g.w','peso caja'] },
+      { key: 'pcs_ctn',    patterns: ['pcs/ctn','pieces per ctn','qty/ctn','pcs per carton','pieces per carton','pcs ctn','pieces per ctn'] },
+      { key: 'lead_time',  patterns: ['lead time','leadtime','delivery time','production time'] },
+      { key: 'payment',    patterns: ['payment terms','payment','condiciones pago'] },
+      // model: prefer supplier's own model columns, avoid Bidcom SKU column
+      { key: 'model',      patterns: ['model number','skylark model','supplier model','item no','item number','part no','modelo','ref'] },
+      // specs: prefer specific/branded spec columns first
+      { key: 'specs',      patterns: ['skylark specifications','your specifications','specification','specs','specifications','description','highlights'] },
+      { key: 'link',       patterns: ['link publication','link','url'] },
+      // moq + quantity last (lower priority)
+      { key: 'moq',        patterns: ['moq','quantity','qty','cantidad','minimum'] },
     ];
 
     headers.forEach((h, i) => {
@@ -574,9 +611,14 @@ const SCPARSER = {
     const specs = {};
 
     // Skip these as they are logistics, not product specs
-    const SKIP = ['fob','price','port','ctn size','ctn weight','pcs/ctn','pieces per',
-                  'carton','moq','lead time','payment','address','phone','mail',
-                  'company','contact','whatsapp','leadtime','delivery'];
+    const SKIP = [
+      'fob','price','port','ctn size','ctn weight','pcs/ctn','pieces per',
+      'carton','moq','lead time','payment','address','phone','mail','email',
+      'company','contact','whatsapp','leadtime','delivery','invoice','date',
+      'total','amount','quantity','picture','image','link','remark','bidcom',
+      'supplier','artwork','deposit','balance','shipment','hs code','note',
+      'peso','weight photo','please refer','attached'
+    ];
 
     const isLogistics = (key) => SKIP.some(s => key.toLowerCase().includes(s));
 
@@ -617,6 +659,27 @@ const SCPARSER = {
     // Pattern 4: "Function: X, Y, Z" split into individual features
     const funcMatch = text.match(/Function\s*:\s*([^\n]{10,200})/i);
     if (funcMatch) specs['Función'] = funcMatch[1].trim();
+
+    // Pattern 5: Tab-separated key-value (Google Sheets format)
+    // "SKYLARK specifications\tDimensions: 25x50x40cm\nRated power: 2500W"
+    const tabLines = text.split('\n').filter(l => l.includes('\t'));
+    for (const line of tabLines) {
+      const parts = line.split('\t').map(p => p.trim()).filter(Boolean);
+      // If a cell contains "Key: Value\nKey2: Value2" extract each
+      for (const part of parts) {
+        const subLines = part.split(/[;\n]/).map(s => s.trim()).filter(Boolean);
+        for (const sub of subLines) {
+          const m2 = sub.match(/^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\/\(\)\-+]{2,50}?)\s*[:：]\s*(.{1,150})$/);
+          if (m2) {
+            const key = m2[1].trim();
+            const val = m2[2].trim();
+            if (!isLogistics(key) && !specs[key] && val.length > 0) {
+              specs[key] = val;
+            }
+          }
+        }
+      }
+    }
 
     return specs;
   },
@@ -3338,7 +3401,7 @@ const APP = {
     const winnerCard = `
       <div class="cot-winner-card" style="margin-bottom:20px">
         <div class="cot-winner-label">🏆 MEJOR COTIZACIÓN — SKU ${sku}</div>
-        <div class="cot-winner-name">${winner.proveedor}${winner.logistics?.modelo?' — '+winner.logistics.modelo:''}${docTypeBadge(winner)}</div>
+        <div class="cot-winner-name">${winner.proveedor}${winner.logistics?.modelo?' — '+winner.logistics.modelo:''}</div>
         <div class="cot-winner-meta">
           ${winner.fob_num?`<span>💰 FOB <strong>USD ${winner.fob_num}</strong></span>`:''}
           ${winner.logistics?.puerto?`<span>🚢 <strong>${winner.logistics.puerto}</strong></span>`:''}
