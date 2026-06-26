@@ -1,7 +1,7 @@
 // ─── GADNIC COMPARADOR · AI (Groq) ────────────────────────────────────────────
 const GEMINI = {
-  MODEL: 'llama-3.3-70b-versatile',
-  ENDPOINT: 'https://api.groq.com/openai/v1/chat/completions',
+  MODEL: 'gemini-2.0-flash',
+  ENDPOINT: 'https://generativelanguage.googleapis.com/v1beta/models/',
 
   async _fetchURL(url) {
     // Jina AI Reader — convierte cualquier URL en texto + imágenes, gratis
@@ -22,25 +22,39 @@ const GEMINI = {
   async _call(prompt) {
     const { geminiKey } = DB.getSettings();
     if (!geminiKey) throw new Error('API key no configurada. Ir a ⚙️ Config.');
-    const res = await fetch(this.ENDPOINT, {
+
+    // Gemini REST API — generateContent endpoint
+    const url = `${this.ENDPOINT}${this.MODEL}:generateContent?key=${geminiKey}`;
+    const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${geminiKey}`
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: this.MODEL,
-        temperature: 0.2,
-        max_tokens: 2048,
-        messages: [{ role: 'user', content: prompt }]
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 4096,
+          responseMimeType: 'text/plain'
+        }
       })
     });
+    if (res.status === 429) {
+      // Rate limit — wait and retry once
+      const retryAfter = parseInt(res.headers.get('Retry-After') || '15', 10);
+      await new Promise(r => setTimeout(r, retryAfter * 1000));
+      const res2 = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!res2.ok) {
+        const err2 = await res2.json().catch(() => ({}));
+        throw new Error('Rate limit de Gemini alcanzado. Esperá unos segundos y volvé a intentar. (' + (err2.error?.message || res2.status) + ')');
+      }
+      const data2 = await res2.json();
+      return data2.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    }
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error?.message || `Error ${res.status}`);
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || `Gemini API Error ${res.status}`);
     }
     const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   },
 
   _parseJSON(text) {
@@ -578,31 +592,52 @@ Reglas:
       `- id: "${c.id}", nombre: "${c.nombre}", emoji: "${c.emoji||'📦'}", campos: [${(c.campos||[]).map(f=>f.label).join(', ')}]`
     ).join('\n');
 
-    const prompt = `Sos un experto en categorización de productos de consumo.
+    const specsContext = Array.isArray(specsTable)
+      ? specsTable.join(', ')
+      : Object.keys(specsTable || {}).join(', ');
+
+    const prompt = `Sos un experto en categorización de productos de consumo e importaciones.
 
 PRODUCTO: ${productDesc}
-SPECS DETECTADAS: ${Array.isArray(specsTable) ? specsTable.join(', ') : JSON.stringify(specsTable)}
+ESPECIFICACIONES TÉCNICAS DETECTADAS: ${specsContext}
 
-CATEGORÍAS EXISTENTES:
+CATEGORÍAS EXISTENTES EN EL SISTEMA:
 ${catList || 'Ninguna todavía'}
 
-Determiná a qué categoría pertenece este producto.
-Si coincide con una existente, usá su id.
-Si es nueva, sugerí nombre, emoji y campos.
+Tu tarea tiene DOS partes:
+
+PARTE 1 — CATEGORIZACIÓN:
+Determiná si este producto corresponde a alguna categoría existente o si es una categoría nueva.
+Para que sea "existente", el producto debe ser claramente de esa categoría (no solo parecido).
+
+PARTE 2 — CAMPOS DE LA CATEGORÍA (SIEMPRE REQUERIDO):
+Independientemente de si la categoría es existente o nueva, generá la lista completa de campos
+técnicos relevantes para comparar productos de este tipo.
+Basate en las specs detectadas Y en tu conocimiento del tipo de producto.
+Incluí entre 8 y 15 campos. Ordenalos: primero los más importantes para la decisión de compra.
+
+Para cada campo:
+- "label": nombre en español claro y conciso
+- "tipo": "numero" si tiene valor numérico con unidad, "booleano" si es característica presente/ausente, "texto" para todo lo demás
+- "unidad": unidad de medida si aplica (RPM, W, V, mAh, cm, mm, g, kg, °C, etc.)
+- "req": true si es crítico para comparar este tipo de producto, false si es opcional
 
 Respondé SOLO con JSON válido, sin backticks:
 {
   "existing_cat_id": null,
-  "suggested_name": "Nombre de categoría",
+  "suggested_name": "Nombre de categoría en español",
   "suggested_id": "id_snake_case",
-  "suggested_emoji": "📦",
+  "suggested_emoji": "emoji representativo",
   "suggested_campos": [
-    { "label": "Nombre campo", "tipo": "texto|numero|booleano", "unidad": "", "req": true }
+    { "label": "Velocidad máxima", "tipo": "numero", "unidad": "RPM", "req": true },
+    { "label": "Potencia", "tipo": "numero", "unidad": "W", "req": true },
+    { "label": "Tipo de control", "tipo": "texto", "unidad": "", "req": true },
+    { "label": "Batería incluida", "tipo": "booleano", "unidad": "", "req": false }
   ],
-  "reasoning": "Por qué esta categoría"
+  "reasoning": "Explicación breve de la categoría y por qué estos campos"
 }
 
-Si coincide con existente, pon su id en existing_cat_id y dejá los campos suggested vacíos.`;
+Si coincide con una categoría existente, usá su id en existing_cat_id pero igualmente completá suggested_campos con los campos más relevantes para ese tipo de producto.`;
 
     try {
       const text = await this._call(prompt);

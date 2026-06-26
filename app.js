@@ -1291,7 +1291,7 @@ const APP = {
     document.getElementById('sec-nueva').innerHTML = `
       <div class="wizard-wrap">
         <div class="wizard-head">
-          <h2>Nueva Comparativa — ${CONFIG.categorias[this.state.wizard.catId].emoji} ${CONFIG.categorias[this.state.wizard.catId].nombre}</h2>
+          <h2>Nueva Comparativa — ${(CONFIG.getAllCats()[this.state.wizard.catId]||{}).emoji||''} ${(CONFIG.getAllCats()[this.state.wizard.catId]||{}).nombre||this.state.wizard.catId}</h2>
           <div class="wizard-steps">${this._stepsDots(2)}</div>
         </div>
         <h3 class="wizard-q">¿Qué tipo de comparativa?</h3>
