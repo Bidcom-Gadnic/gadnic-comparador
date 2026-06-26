@@ -26,47 +26,44 @@ const SCPARSER = {
     text = text.replace(/[^\n]*\n---MATCHING ROWS---\n?/g, '');
     text = text.replace(/---MATCHING ROWS---\n?/g, '');
 
-    const lines      = text.split('\n').map(l => l.trim()).filter(Boolean);
-    const docType    = this._detectDocumentType(text, lines);
-    const isCSV      = this._detectCSV(lines);
-    const hasHeaders = this._detectExplicitHeaders(lines);
+    // Rejoin multiline CSV cells before detection/parsing
+    const rejoinedText = this._rejoinMultilineCSV(text);
+    const lines        = rejoinedText.split('\n').map(l => l.trim()).filter(Boolean);
+    const docType      = this._detectDocumentType(rejoinedText, lines);
+    const isCSV        = this._detectCSV(lines);
+    const hasHeaders   = this._detectExplicitHeaders(lines);
 
     let result;
 
     switch (docType) {
       case 'packaging':
-        // Packaging/box design — no logistics, only product specs
-        result = { ...this._empty(), _docType: 'packaging', specs_raw: text.substring(0, 2000) };
+        result = { ...this._empty(), _docType: 'packaging', specs_raw: rejoinedText.substring(0, 2000) };
         break;
 
       case 'catalogue_qty_price':
-        // Catalogue with price tiers (20: $X, 100: $Y, 1000: $Z)
-        result = this._parseCatalogueQtyPrice(text, lines, skuHint, refUrlHint);
+        result = this._parseCatalogueQtyPrice(rejoinedText, lines, skuHint, refUrlHint);
         break;
 
       case 'catalogue_multi_model':
-        // Catalogue with multiple models/variants (capacity, color, etc.)
         result = isCSV && hasHeaders
           ? this._parseCSVWithHeaders(lines, skuHint, refUrlHint)
-          : this._parseCatalogueMultiModel(text, lines, skuHint);
+          : this._parseCatalogueMultiModel(rejoinedText, lines, skuHint);
         break;
 
       case 'proforma':
       case 'invoice':
-        // Proforma invoice — single product, structured table
         result = isCSV && hasHeaders
           ? this._parseCSVWithHeaders(lines, skuHint, refUrlHint)
-          : this._parseTextFreeform(text);
+          : this._parseTextFreeform(rejoinedText);
         break;
 
       default:
-        // Freeform / unknown — try all parsers
         if (isCSV && hasHeaders) {
           result = this._parseCSVWithHeaders(lines, skuHint, refUrlHint);
         } else if (isCSV) {
           result = this._parseCSVFreeform(lines, skuHint, refUrlHint);
         } else {
-          result = this._parseTextFreeform(text);
+          result = this._parseTextFreeform(rejoinedText);
         }
     }
 
@@ -580,25 +577,25 @@ const SCPARSER = {
   // ── Rejoin multiline quoted CSV cells into single lines ───────────────────
   // Handles: "cell content\nspanning\nmultiple lines" → single line
   _rejoinMultilineCSV(text) {
-    const lines   = text.split('\n');
-    const result  = [];
-    let   buffer  = '';
-    let   inQuote = false;
+    // Rejoin lines inside quoted cells using | separator
+    // This preserves CSV column structure while keeping specs readable
+    const rawLines = text.split('\n');
+    const result   = [];
+    let   buffer   = '';
+    let   inQuote  = false;
 
-    for (const line of lines) {
+    for (const line of rawLines) {
       const quoteCount = (line.match(/"/g) || []).length;
       if (!inQuote) {
         if (quoteCount % 2 === 1) {
-          // Odd number of quotes — starts a multiline quoted cell
           buffer  = line;
           inQuote = true;
         } else {
           result.push(line);
         }
       } else {
-        buffer += ' ' + line.trim();
+        buffer += ' | ' + line.trim();
         if (quoteCount % 2 === 1) {
-          // Closes the quoted cell
           result.push(buffer);
           buffer  = '';
           inQuote = false;
@@ -609,6 +606,7 @@ const SCPARSER = {
     return result.join('\n');
   },
 
+
   // ── Extract tech specs from structured text ──────────────────────────────
   // Handles: proforma invoices, catalogues, freeform text, multi-lang docs
   parseTechSpecs(rawText, { knownFields = [] } = {}) {
@@ -616,8 +614,9 @@ const SCPARSER = {
 
     const text = rawText
       .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-      .replace(/=DISPIMG\([^)]+\)/gi, '')   // strip Excel image formulas
-      .replace(/\b\d+\s*[：:]\s*\$[\d.]+/g, ''); // strip price tiers
+      .replace(/=DISPIMG\([^)]+\)/gi, '')
+      .replace(/\b\d+\s*[：:]\s*\$[\d.]+/g, '')
+      .replace(/ \| /g, '\n');  // restore newlines from rejoined multiline cells
 
     const specs = {};
 
