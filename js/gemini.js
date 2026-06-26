@@ -65,8 +65,9 @@ const GEMINI = {
 
   // ── Extract product specs from a URL ──────────────────────────────────────
   async extractFromURL(url, catId) {
-    const cat    = CONFIG.categorias[catId];
-    const campos = cat.campos.map(c => `"${c.id}": null  // ${c.label}${c.unidad ? ' en ' + c.unidad : ''}`).join('\n  ');
+    const cat    = CONFIG.getAllCats()[catId];
+    if (!cat) throw new Error(`Categoría "${catId}" no encontrada`);
+    const campos = (cat.campos||[]).map(c => `"${c.id}": null  // ${c.label}${c.unidad ? ' en ' + c.unidad : ''}`).join('\n  ');
 
     const prompt = `Sos un analista de productos para Argentina.
 Analizá el contenido del siguiente link de producto y extraé las specs técnicas.
@@ -95,7 +96,7 @@ Para "nivel" estimá: Entry / Mid / High / Premium según precio y specs.`;
 
   // ── Analyze comparison and generate insights ──────────────────────────────
   async analyzeComparativa(propios, externos, tipo, catId) {
-    const cat     = CONFIG.categorias[catId];
+    const cat     = CONFIG.getAllCats()[catId];
     const tipoObj = CONFIG.tipos.find(t => t.id === tipo);
 
     const prompt = `Sos un analista de producto senior para Gadnic/Bidcom Argentina.
@@ -160,8 +161,9 @@ Respondé SOLO con JSON válido, sin texto adicional ni backticks:
 
   // ── Extract multiple products from PDF text + annotations ─────────────────
   async extractFromPDF(pdfText, linksByRow, catId) {
-    const cat    = CONFIG.categorias[catId];
-    const campos = cat.campos.map(c =>
+    const cat    = CONFIG.getAllCats()[catId];
+    if (!cat) throw new Error(`Categoría "${catId}" no encontrada`);
+    const campos = (cat.campos||[]).map(c =>
       `"${c.id}": null  // ${c.label}${c.unidad ? ' en ' + c.unidad : ''} (tipo: ${c.tipo})`
     ).join('\n      ');
 
@@ -220,7 +222,7 @@ Notas:
 
   // ── Fill missing specs using AI ────────────────────────────────────────────
   async fillMissingSpecs(product, catId) {
-    const cat     = CONFIG.categorias[catId];
+    const cat     = CONFIG.getAllCats()[catId];
     const missing = cat.campos.filter(f => !product[f.id] && f.req).map(f => f.label);
     if (!missing.length) return product;
 
