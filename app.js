@@ -1059,7 +1059,8 @@ const APP = {
     const isEdit = !!product;
     const p      = product || {};
 
-    const camposHTML = cat.campos.map(f => {
+    if (!cat) { this.showToast('Categoría no encontrada. Intentá recargar la página.', 'error'); return; }
+    const camposHTML = (cat.campos || []).map(f => {
       const val = p[f.id] ?? '';
       if (f.tipo === 'booleano') {
         return `
@@ -1219,7 +1220,7 @@ const APP = {
     }
     // Convert booleans and numbers
     const cat = CONFIG.getAllCats()[catId];
-    for (const f of cat.campos) {
+    for (const f of (cat?.campos || [])) {
       if (f.tipo === 'booleano' && data[f.id] !== '') data[f.id] = data[f.id] === 'true';
       if (f.tipo === 'numero'  && data[f.id] !== '') data[f.id] = parseFloat(data[f.id]) || data[f.id];
     }
