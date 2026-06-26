@@ -1422,7 +1422,7 @@ const APP = {
             </div>
           </div>
           <div class="specs-ext-grid">
-            ${cat.campos.map(f => {
+            ${(cat.campos||[]).map(f => {
               const v = p[f.id] ?? '';
               if (f.tipo === 'booleano') return `
                 <div class="form-group">
@@ -1933,7 +1933,7 @@ const APP = {
         '<div class="cat-list-info">' +
         '<span class="cat-list-emoji">' + (cat.emoji||'📦') + '</span>' +
         '<div><strong>' + cat.nombre + '</strong>' +
-        '<span class="cat-list-meta"> · ' + cat.campos.length + ' specs · ' + (isBase ? 'Base' : 'Personalizada') + '</span></div>' +
+        '<span class="cat-list-meta"> · ' + (cat.campos||[]).length + ' specs · ' + (isBase ? 'Base' : 'Personalizada') + '</span></div>' +
         '</div>' +
         '<div class="cat-list-actions">' + editBtn + delBtn + '</div></div>';
     }).join('');
@@ -1943,7 +1943,7 @@ const APP = {
     const allCats = CONFIG.getAllCats();
     const cat     = catId ? allCats[catId] : null;
     const isBase  = catId ? CONFIG.isBaseCat(catId) : false;
-    const campos  = cat ? cat.campos : [];
+    const campos  = cat ? (cat.campos || []) : [];
 
     const camposHTML = campos.map((f) => {
       const unidad = f.unidad || '';
