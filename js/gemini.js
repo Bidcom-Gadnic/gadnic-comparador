@@ -37,6 +37,18 @@ const GEMINI = {
         }
       })
     });
+    if (res.status === 429) {
+      // Rate limit — wait and retry once
+      const retryAfter = parseInt(res.headers.get('Retry-After') || '15', 10);
+      await new Promise(r => setTimeout(r, retryAfter * 1000));
+      const res2 = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!res2.ok) {
+        const err2 = await res2.json().catch(() => ({}));
+        throw new Error('Rate limit de Gemini alcanzado. Esperá unos segundos y volvé a intentar. (' + (err2.error?.message || res2.status) + ')');
+      }
+      const data2 = await res2.json();
+      return data2.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message || `Gemini API Error ${res.status}`);

@@ -14,54 +14,56 @@ const SCPARSER = {
   parseLogistics(rawText, { skuHint = '', refUrlHint = '', fobHint = '' } = {}) {
     if (!rawText || !rawText.trim()) return this._empty();
 
-    // Normalize + strip DISPIMG formulas (Excel image cells)
-    const text = rawText
+    // Normalize + strip DISPIMG formulas + remove ---MATCHING ROWS--- corruption
+    let text = rawText
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
       .replace(/=DISPIMG\([^)]+\)/gi, '')
       .replace(/DISPIMG\([^)]+\)/gi, '');
 
-    const lines      = text.split('\n').map(l => l.trim()).filter(Boolean);
-    const docType    = this._detectDocumentType(text, lines);
-    const isCSV      = this._detectCSV(lines);
-    const hasHeaders = this._detectExplicitHeaders(lines);
+    // Remove ---MATCHING ROWS--- marker AND the partial broken row before it
+    // (The row before the marker is a fragment of a multiline cell that got cut)
+    text = text.replace(/[^\n]*\n---MATCHING ROWS---\n?/g, '');
+    text = text.replace(/---MATCHING ROWS---\n?/g, '');
+
+    // Rejoin multiline CSV cells before detection/parsing
+    const rejoinedText = this._rejoinMultilineCSV(text);
+    const lines        = rejoinedText.split('\n').map(l => l.trim()).filter(Boolean);
+    const docType      = this._detectDocumentType(rejoinedText, lines);
+    const isCSV        = this._detectCSV(lines);
+    const hasHeaders   = this._detectExplicitHeaders(lines);
 
     let result;
 
     switch (docType) {
       case 'packaging':
-        // Packaging/box design — no logistics, only product specs
-        result = { ...this._empty(), _docType: 'packaging', specs_raw: text.substring(0, 2000) };
+        result = { ...this._empty(), _docType: 'packaging', specs_raw: rejoinedText.substring(0, 2000) };
         break;
 
       case 'catalogue_qty_price':
-        // Catalogue with price tiers (20: $X, 100: $Y, 1000: $Z)
-        result = this._parseCatalogueQtyPrice(text, lines, skuHint, refUrlHint);
+        result = this._parseCatalogueQtyPrice(rejoinedText, lines, skuHint, refUrlHint);
         break;
 
       case 'catalogue_multi_model':
-        // Catalogue with multiple models/variants (capacity, color, etc.)
         result = isCSV && hasHeaders
           ? this._parseCSVWithHeaders(lines, skuHint, refUrlHint)
-          : this._parseCatalogueMultiModel(text, lines, skuHint);
+          : this._parseCatalogueMultiModel(rejoinedText, lines, skuHint);
         break;
 
       case 'proforma':
       case 'invoice':
-        // Proforma invoice — single product, structured table
         result = isCSV && hasHeaders
           ? this._parseCSVWithHeaders(lines, skuHint, refUrlHint)
-          : this._parseTextFreeform(text);
+          : this._parseTextFreeform(rejoinedText);
         break;
 
       default:
-        // Freeform / unknown — try all parsers
         if (isCSV && hasHeaders) {
           result = this._parseCSVWithHeaders(lines, skuHint, refUrlHint);
         } else if (isCSV) {
           result = this._parseCSVFreeform(lines, skuHint, refUrlHint);
         } else {
-          result = this._parseTextFreeform(text);
+          result = this._parseTextFreeform(rejoinedText);
         }
     }
 
@@ -305,7 +307,7 @@ const SCPARSER = {
       ctn_weight:    this._parseNum(get('ctn_weight') || get('gw') || get('gross_weight')),
       pcs_ctn:       this._parseInt(get('pcs_ctn') || get('qty_ctn') || get('pieces_ctn') || get('moq_ctn')),
       lead_time:     this._parseLead(get('lead_time') || get('delivery') || this._extractLead(companyText)),
-      payment_terms: get('payment') || this._extractPayment(companyText),
+      payment_terms: (get('payment') || this._extractPayment(companyText)).replace(/[",\s]+$/, '').trim(),
       modelo:        get('model') || '',
       moq:           this._parseInt(get('moq') || get('quantity') || get('qty')),
       specs_raw:     specsRaw || get('specs') || '',
@@ -324,10 +326,10 @@ const SCPARSER = {
       { key: 'lead_time',  patterns: ['lead time','leadtime','delivery time','production time'] },
       { key: 'payment',    patterns: ['payment terms','payment','condiciones pago'] },
       // model: prefer supplier's own model columns, avoid Bidcom SKU column
-      { key: 'model',      patterns: ['model number','skylark model','supplier model','item no','item number','part no','modelo','ref'] },
+      { key: 'model',      patterns: ['model number','item number','part number','supplier model','skylark model','item no','part no','modelo'] },
       // specs: prefer specific/branded spec columns first
       { key: 'specs',      patterns: ['skylark specifications','your specifications','specification','specs','specifications','description','highlights'] },
-      { key: 'link',       patterns: ['link publication','link','url'] },
+      { key: 'link',       patterns: ['link publication of reference','link publication','url referencia'] },
       // moq + quantity last (lower priority)
       { key: 'moq',        patterns: ['moq','quantity','qty','cantidad','minimum'] },
     ];
@@ -335,7 +337,13 @@ const SCPARSER = {
     headers.forEach((h, i) => {
       const hl = h.toLowerCase().replace(/[^a-z0-9\s]/g,' ').trim();
       for (const rule of rules) {
-        if (!map[rule.key] && rule.patterns.some(p => hl.includes(p) || p.includes(hl))) {
+        if (!map[rule.key] && rule.patterns.some(p => {
+          // Exact match, starts-with, or ends-with (word boundary approach)
+          return hl === p || hl.startsWith(p + ' ') || hl.endsWith(' ' + p)
+              || hl.includes(' ' + p + ' ')
+              || (p.length > 5 && hl.startsWith(p))
+              || (p.length > 5 && p.startsWith(hl));
+        })) {
           map[rule.key] = i;
           break;
         }
@@ -569,25 +577,25 @@ const SCPARSER = {
   // ── Rejoin multiline quoted CSV cells into single lines ───────────────────
   // Handles: "cell content\nspanning\nmultiple lines" → single line
   _rejoinMultilineCSV(text) {
-    const lines   = text.split('\n');
-    const result  = [];
-    let   buffer  = '';
-    let   inQuote = false;
+    // Rejoin lines inside quoted cells using | separator
+    // This preserves CSV column structure while keeping specs readable
+    const rawLines = text.split('\n');
+    const result   = [];
+    let   buffer   = '';
+    let   inQuote  = false;
 
-    for (const line of lines) {
+    for (const line of rawLines) {
       const quoteCount = (line.match(/"/g) || []).length;
       if (!inQuote) {
         if (quoteCount % 2 === 1) {
-          // Odd number of quotes — starts a multiline quoted cell
           buffer  = line;
           inQuote = true;
         } else {
           result.push(line);
         }
       } else {
-        buffer += ' ' + line.trim();
+        buffer += ' | ' + line.trim();
         if (quoteCount % 2 === 1) {
-          // Closes the quoted cell
           result.push(buffer);
           buffer  = '';
           inQuote = false;
@@ -598,6 +606,7 @@ const SCPARSER = {
     return result.join('\n');
   },
 
+
   // ── Extract tech specs from structured text ──────────────────────────────
   // Handles: proforma invoices, catalogues, freeform text, multi-lang docs
   parseTechSpecs(rawText, { knownFields = [] } = {}) {
@@ -605,8 +614,9 @@ const SCPARSER = {
 
     const text = rawText
       .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-      .replace(/=DISPIMG\([^)]+\)/gi, '')   // strip Excel image formulas
-      .replace(/\b\d+\s*[：:]\s*\$[\d.]+/g, ''); // strip price tiers
+      .replace(/=DISPIMG\([^)]+\)/gi, '')
+      .replace(/\b\d+\s*[：:]\s*\$[\d.]+/g, '')
+      .replace(/ \| /g, '\n');  // restore newlines from rejoined multiline cells
 
     const specs = {};
 
@@ -642,8 +652,15 @@ const SCPARSER = {
       if (!isLogistics(key) && key && val && !specs[key]) specs[key] = val;
     }
 
-    // Pattern 3: Catalogue inline format "Material: ABS Battery: 550mAh"
-    // Split compound lines and extract
+    // Pattern 3: Bullet-point specs "• Power: 2300W" or "- Voltage: 220V"
+    const bulletPattern = /^[•\-\*]\s*([A-Za-zÀ-ÿ][^:\n]{2,50}?)\s*:\s*(.{1,150})$/gm;
+    while ((m = bulletPattern.exec(text)) !== null) {
+      const key = m[1].trim();
+      const val = m[2].trim().replace(/[,;]+$/, '');
+      if (!isLogistics(key) && key && val && !specs[key]) specs[key] = val;
+    }
+
+    // Pattern 4b: Catalogue inline format "Material: ABS Battery: 550mAh"
     const inlinePattern = /([A-Z][a-zA-Z\s]{2,30}?)\s*:\s*([^:]{3,80}?)(?=\s+[A-Z][a-zA-Z\s]{2,30}:|$)/g;
     const longLines = text.split('\n').filter(l => l.length > 60 && l.includes(':'));
     for (const line of longLines) {
@@ -1042,7 +1059,8 @@ const APP = {
     const isEdit = !!product;
     const p      = product || {};
 
-    const camposHTML = cat.campos.map(f => {
+    if (!cat) { this.showToast('Categoría no encontrada. Intentá recargar la página.', 'error'); return; }
+    const camposHTML = (cat.campos || []).map(f => {
       const val = p[f.id] ?? '';
       if (f.tipo === 'booleano') {
         return `
@@ -1202,7 +1220,7 @@ const APP = {
     }
     // Convert booleans and numbers
     const cat = CONFIG.getAllCats()[catId];
-    for (const f of cat.campos) {
+    for (const f of (cat?.campos || [])) {
       if (f.tipo === 'booleano' && data[f.id] !== '') data[f.id] = data[f.id] === 'true';
       if (f.tipo === 'numero'  && data[f.id] !== '') data[f.id] = parseFloat(data[f.id]) || data[f.id];
     }
@@ -1273,7 +1291,7 @@ const APP = {
     document.getElementById('sec-nueva').innerHTML = `
       <div class="wizard-wrap">
         <div class="wizard-head">
-          <h2>Nueva Comparativa — ${CONFIG.categorias[this.state.wizard.catId].emoji} ${CONFIG.categorias[this.state.wizard.catId].nombre}</h2>
+          <h2>Nueva Comparativa — ${(CONFIG.getAllCats()[this.state.wizard.catId]||{}).emoji||''} ${(CONFIG.getAllCats()[this.state.wizard.catId]||{}).nombre||this.state.wizard.catId}</h2>
           <div class="wizard-steps">${this._stepsDots(2)}</div>
         </div>
         <h3 class="wizard-q">¿Qué tipo de comparativa?</h3>
